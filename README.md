@@ -23,7 +23,7 @@
   - [market_data.py]：yfinance 市场快照（当前仅使用 plan 中第一个 ticker）
 - 配置与模型
   - [config.py]：迭代次数、每次搜索结果数、超时等
-  - [llm.py]：DeepSeek（OpenAI 兼容）优先，OpenAI 兜底
+  - [llm.py]：DeepSeek
 
 ## 快速开始
 
@@ -35,7 +35,7 @@ python3 -m venv .venv
 ./.venv/bin/pip install -e ".[dev]"
 ```
 
-2. 配置环境变量（二选一/可组合）
+2. 配置环境变量
 
 - DeepSeek
 
