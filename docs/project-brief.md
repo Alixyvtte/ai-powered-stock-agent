@@ -2,347 +2,729 @@
 
 ## Overview
 
-`stock-agent` is a small LangGraph-based CLI agent for stock research. Its current scope is narrow and practical: take a user question about a company or ticker, turn it into a research plan, gather web and market context, extract evidence, and write a cited research memo.
+`stock-agent` is a small LangGraph-based CLI agent for stock research. Its current responsibility is narrow and practical: accept a research question, generate a structured plan, gather web and market context, extract evidence, and write a cited English memo.
 
-The repo is positioned as a research assistant, not an execution or trading system. The README explicitly frames the output as research-only and not investment advice.
+The project is a research assistant, not a trading system. The README positions it as research-only and explicitly excludes investment advice.
 
-## Project Purpose and Current Scope
+This document merges the earlier high-level project brief with the more detailed interface notes from `docs/interface.md`, and rewrites the combined content in English.
 
-The project is built around a single workflow described in [README.md](../README.md):
+## What the Project Exposes
 
-- Convert a stock research question into a structured plan.
-- Search the web for supporting material.
-- Optionally fetch a market snapshot for the first detected ticker.
-- Extract evidence notes from retrieved source snippets.
-- Decide whether additional search passes are needed.
-- Write a final memo with `[S#]` citations.
+The repository does not currently expose an HTTP, REST, gRPC, or WebSocket service. The usable interfaces today are:
 
-This is currently a v0-style agent rather than a full platform. It provides:
+1. A CLI command: `stock-agent`
+2. A Python API centered on `stock_agent.agent.DeepSearchAgent`
+3. Tool-level helper functions for web search and market data
 
-- One CLI entrypoint: `stock-agent`
-- One graph-driven research workflow
-- One LLM abstraction layer
-- Two tool adapters: web search and market data
-- Minimal automated test coverage
+That means the project is best understood as a local library-plus-CLI application rather than a networked service.
 
-It does not currently provide:
+## Runtime Architecture
 
-- Persistent storage
-- A web UI or service API
-- Portfolio management or order execution
-- Strong source-quality filtering or ranking beyond basic deduplication
-- Broad test coverage across edge cases and failure paths
-
-## Runtime Flow
-
-The runtime starts in the package entrypoint defined in [pyproject.toml](../pyproject.toml):
+The package entrypoint is defined in [pyproject.toml](../pyproject.toml):
 
 - `stock-agent = "stock_agent.cli:main"`
 
-From there, the flow is:
+The runtime path is:
 
-1. [`src/stock_agent/cli.py`](../src/stock_agent/cli.py) parses CLI arguments and decides whether to run in trace mode, plain mode, or JSON mode.
-2. [`src/stock_agent/agent.py`](../src/stock_agent/agent.py) constructs `DeepSearchAgent`, loads environment variables with `dotenv`, and builds the graph.
-3. [`src/stock_agent/graphs/deep_search_graph.py`](../src/stock_agent/graphs/deep_search_graph.py) defines and compiles the LangGraph state machine.
-4. The agent either:
-   - calls `run()` to execute the graph and return the final state, or
-   - calls `stream()` to emit step-by-step graph updates for the CLI trace view.
+1. [`src/stock_agent/cli.py`](../src/stock_agent/cli.py) parses arguments and decides how output should be rendered.
+2. [`src/stock_agent/agent.py`](../src/stock_agent/agent.py) creates `DeepSearchAgent`, loads environment variables, and builds the graph.
+3. [`src/stock_agent/graphs/deep_search_graph.py`](../src/stock_agent/graphs/deep_search_graph.py) defines and compiles the LangGraph workflow.
+4. Supporting modules provide model access, web search, and market data lookup.
 
-### CLI Behavior
-
-[`src/stock_agent/cli.py`](../src/stock_agent/cli.py) exposes three main runtime modes:
-
-- Default trace mode: streams node-by-node progress panels and then prints the final report.
-- `--no-trace`: executes the graph in one shot and prints only the final report.
-- `--json`: executes the graph in one shot and prints the full final state as JSON.
-
-The trace panels are lightweight summaries of each node:
-
-- `plan`: topic and subquery count
-- `market`: current market snapshot or a "no ticker detected" message
-- `search_web`: current source count and delta
-- `extract`: evidence note count and delta
-- `decide`: whether more search is needed and how many follow-up queries were generated
-- `write_report`: final report character count
-
-## Core Architecture
-
-The main architecture lives in [`src/stock_agent/graphs/deep_search_graph.py`](../src/stock_agent/graphs/deep_search_graph.py). The graph compiles a `DeepSearchState` workflow with this shape:
+The compiled workflow is:
 
 `plan -> market -> search_web -> extract -> decide -> (search_web | write_report)`
 
-This gives the project a simple deep-search loop:
+This gives the project one explicit deep-search loop:
 
 - plan once
-- enrich with market context
-- search and extract evidence
-- decide whether the evidence is sufficient
-- either search again or write the memo
+- optionally enrich with market data
+- collect sources
+- extract evidence
+- decide whether evidence is sufficient
+- either search again or write the final memo
 
-### State Model
+## Public Interfaces
 
-The shared state is defined as `DeepSearchState` and may include:
+### CLI Interface
 
-- `query`
-- `iteration`
-- `max_iterations`
+The installed command is:
+
+```bash
+stock-agent <query> [--json] [--no-trace]
+```
+
+Behavior by mode:
+
+- Default mode calls `agent.stream(query)`, prints trace panels for each node, and then prints the final memo.
+- `--no-trace` calls `agent.run(query)` and prints only the final memo.
+- `--json` calls `agent.run(query)` and prints the final graph state as JSON.
+- If both `--json` and `--no-trace` are supplied, the code path is effectively driven by `--json`.
+
+Exit behavior:
+
+- `0` on success
+- `1` if execution raises an exception
+
+The trace view summarizes these graph nodes:
+
 - `plan`
-- `subqueries`
-- `sources`
-- `notes`
 - `market`
-- `need_more`
-- `followup_queries`
-- `missing_angles`
-- `final_report`
+- `search_web`
+- `extract`
+- `decide`
+- `write_report`
 
-The file also defines the structured models used by the graph:
+### Python Interface
 
-- `ResearchPlan`
-- `EvidenceNote`
-- `EvidenceNotes`
-- `FollowupDecision`
+The main Python entrypoint is `DeepSearchAgent` in [`src/stock_agent/agent.py`](../src/stock_agent/agent.py).
 
-## Graph Nodes and Responsibilities
+Constructor:
 
-### 1. `plan`
-
-The `plan_node` turns the raw user query into a `ResearchPlan` with:
-
-- a concise `topic`
-- zero or more `tickers`
-- a list of `subqueries`
-- key assumptions or uncertainties to validate
-
-The prompt explicitly asks for 6-10 English subqueries covering business, competition, financials, valuation, catalysts, risks, regulation, and macro. If structured generation fails, the code falls back to a hardcoded generic plan template.
-
-This node also initializes:
-
-- `iteration = 0`
-- empty `sources`
-- empty `notes`
-- empty follow-up state
-
-### 2. `market`
-
-The `market_node` validates the plan, reads the ticker list, and fetches market data only for the first detected ticker. It uses the `fetch_market_snapshot()` helper from [`src/stock_agent/tools/market_data.py`](../src/stock_agent/tools/market_data.py).
-
-If no ticker is present, the node returns an empty market snapshot object instead of failing.
-
-### 3. `search_web`
-
-The `search_node` chooses which queries to run:
-
-- first pass: `subqueries`
-- later passes: `followup_queries` if they exist
-
-For each active query, it calls `web_search()` from [`src/stock_agent/tools/web_search.py`](../src/stock_agent/tools/web_search.py). It then:
-
-- aggregates all returned documents
-- picks up to 12 documents using `pick_best_docs()`
-- deduplicates against previously stored source URLs
-- stores each source with an incremental `id`
-- truncates stored content to reduce state size
-
-### 4. `extract`
-
-The `extract_node` converts source snippets into structured evidence notes. It selects up to 8 unseen sources that have content, then prompts the model to produce:
-
-- `claim`
-- `why_it_matters`
-- `source_id`
-
-The prompt explicitly asks for verifiable evidence and limits output to at most 2 items per source.
-
-If extraction fails, the current fallback is simply an empty note list rather than a hard failure.
-
-### 5. `decide`
-
-The `decide_node` asks the model whether the current evidence is sufficient for a high-quality memo. If not, it asks for 3-6 follow-up search queries and a list of missing angles.
-
-This node increments `iteration` and stores:
-
-- `need_more`
-- `followup_queries`
-- `missing_angles`
-
-The routing decision is handled by `route_after_decide()`:
-
-- if `need_more` is true and `iteration < max_iterations`, return to `search_web`
-- otherwise continue to `write_report`
-
-### 6. `write_report`
-
-The `write_node` asks the model to write a structured English research memo using only the accumulated notes and sources. The prompt requires:
-
-- Executive Summary
-- Bull Case
-- Bear Case
-- Key Catalysts
-- Key Risks
-- Open Questions
-- Sources
-
-It also requires `[S#]` citations after key statements and ends with the disclaimer:
-
-`For research purposes only. Not investment advice.`
-
-## Supporting Modules
-
-### Agent Wrapper
-
-[`src/stock_agent/agent.py`](../src/stock_agent/agent.py) provides the main wrapper class, `DeepSearchAgent`.
-
-Its responsibilities are:
-
-- load `.env` variables with `load_dotenv()`
-- construct `AgentConfig`
-- build the compiled graph
-- provide `run(query)` for full execution
-- provide `stream(query)` for update-based execution
-
-The returned `AgentResult` includes:
-
-- `final_report`
-- full final `state`
-
-### Configuration
-
-[`src/stock_agent/config.py`](../src/stock_agent/config.py) keeps configuration intentionally small. `AgentConfig` currently exposes:
-
-- `openai_model`
-- `max_iterations`
-- `max_results_per_query`
-- `timeout_s`
-
-These are loaded from environment variables:
-
-- `OPENAI_MODEL`
-- `STOCK_AGENT_MAX_ITERATIONS`
-- `STOCK_AGENT_MAX_RESULTS`
-- `STOCK_AGENT_TIMEOUT_S`
-
-### Model Selection
-
-[`src/stock_agent/llm.py`](../src/stock_agent/llm.py) centralizes model construction with `ChatOpenAI`.
+```python
+DeepSearchAgent(config: Optional[AgentConfig] = None)
+```
 
 Behavior:
 
-- If `DEEPSEEK_API_KEY` is set, the code uses DeepSeek through the OpenAI-compatible client.
-- It reads:
-  - `DEEPSEEK_API_KEY`
-  - `DEEPSEEK_BASE_URL`
-  - `DEEPSEEK_MODEL`
-- Otherwise it requires `OPENAI_API_KEY` and uses `OPENAI_MODEL` from config.
+- calls `load_dotenv()`
+- uses `AgentConfig.from_env()` when no config is passed
+- builds the LangGraph workflow once during initialization
 
-This means the project presents a single chat-model abstraction even though it can target two providers.
+Primary methods:
 
-### Web Search
+```python
+run(query: str) -> AgentResult
+stream(query: str) -> Iterator[Tuple[str, Dict[str, Any]]]
+```
 
-[`src/stock_agent/tools/web_search.py`](../src/stock_agent/tools/web_search.py) defines a simple `WebDocument` dataclass and two search backends:
+`run()` returns:
 
-- Tavily via `_search_tavily()`
-- DuckDuckGo via `_search_duckduckgo()`
+```python
+AgentResult(
+    final_report: str,
+    state: Dict[str, Any],
+)
+```
 
-The public `web_search()` helper prefers Tavily when `TAVILY_API_KEY` is present and falls back to DuckDuckGo otherwise.
+`stream()` yields:
 
-`pick_best_docs()` is intentionally simple. It:
+```python
+(node_name: str, update_dict: Dict[str, Any])
+```
 
-- requires a URL by default
-- deduplicates by URL or title
-- keeps the first `limit` documents
+In normal operation, `node_name` is the graph node name. If LangGraph returns a non-standard event shape, the wrapper falls back to:
 
-There is no scoring by credibility, freshness, domain quality, or relevance beyond backend ordering.
+```python
+("event", {"_raw": ...})
+```
 
-### Market Data
+### Tool-Level Interfaces
 
-[`src/stock_agent/tools/market_data.py`](../src/stock_agent/tools/market_data.py) wraps `yfinance` in a `MarketSnapshot` dataclass with:
+The repo also exposes two direct helper modules:
 
-- `ticker`
-- `currency`
-- `price`
-- `market_cap`
-- `trailing_pe`
-- `forward_pe`
-- `dividend_yield`
+- [`src/stock_agent/tools/web_search.py`](../src/stock_agent/tools/web_search.py)
+- [`src/stock_agent/tools/market_data.py`](../src/stock_agent/tools/market_data.py)
 
-`fetch_market_snapshot()` reads `Ticker.info`, coerces numeric values where possible, and degrades to `None` values when fields are missing or parsing fails.
+These are not formal service APIs, but they are stable enough to be treated as internal extension points.
 
-## Current Limitations and Notable Implementation Quirks
+## Configuration and Environment Variables
 
-Several details are worth knowing before extending the project.
+### AgentConfig
 
-### 1. Structured output depends on provider path
+[`src/stock_agent/config.py`](../src/stock_agent/config.py) defines:
 
-In the graph builder, `use_structured` is enabled only when `DEEPSEEK_API_KEY` is absent. In practice:
+```python
+AgentConfig(
+    openai_model: str = "gpt-4o-mini",
+    max_iterations: int = 2,
+    max_results_per_query: int = 5,
+    timeout_s: int = 25,
+)
+```
 
-- OpenAI path: uses `with_structured_output(...)`
-- DeepSeek path: uses manual JSON prompting plus `_extract_json_object()` and retry logic
+These values can be passed directly or loaded from environment variables with `AgentConfig.from_env()`.
 
-That makes schema reliability dependent on which provider is active.
+### Model Configuration
 
-### 2. Extraction coverage is capped per pass
+Supported environment variables:
 
-`extract_node` only processes up to 8 unseen sources at a time, while `search_node` may add up to 12 new sources per search pass. This means some newly collected sources may remain unprocessed if the loop stops early.
+- `DEEPSEEK_API_KEY`
+  - If present, DeepSeek is preferred over OpenAI.
+- `DEEPSEEK_MODEL`
+  - DeepSeek model name.
+  - Falls back to `OPENAI_MODEL`, which itself defaults to `gpt-4o-mini`.
+- `DEEPSEEK_BASE_URL`
+  - Defaults to `https://api.deepseek.com/v1`.
+- `OPENAI_API_KEY`
+  - Required only when `DEEPSEEK_API_KEY` is absent.
+- `OPENAI_MODEL`
+  - Defaults to `gpt-4o-mini`.
 
-### 3. Source selection is intentionally shallow
+The model client is built in [`src/stock_agent/llm.py`](../src/stock_agent/llm.py) using `ChatOpenAI`, including the DeepSeek path via an OpenAI-compatible base URL.
 
-Search results are deduplicated and truncated, but not meaningfully ranked for:
+### Search and Execution Configuration
 
-- authority
-- primary-vs-secondary source quality
-- recency
-- conflicting claims
+Additional environment variables:
 
-As a result, memo quality depends heavily on search backend output ordering and model judgment.
+- `TAVILY_API_KEY`
+  - If present, web search prefers Tavily.
+  - Otherwise the code falls back to DuckDuckGo.
+- `STOCK_AGENT_MAX_ITERATIONS`
+  - Maximum allowed `search_web -> extract -> decide` loop count.
+  - Default: `2`
+- `STOCK_AGENT_MAX_RESULTS`
+  - Maximum raw results fetched per query.
+  - Default: `5`
+- `STOCK_AGENT_TIMEOUT_S`
+  - Search timeout setting passed through the graph.
+  - Default: `25`
 
-### 4. Report generation depends on extracted notes
+One implementation detail matters here: `timeout_s` is forwarded into `web_search(...)`, but the current search backends do not enforce a strong explicit timeout contract themselves.
 
-The report prompt is driven primarily by `notes`, not full raw source content. If extraction produces weak or empty notes, the final memo can still be generated, but its evidence base may be thin.
+## Data Models and State Contract
 
-### 5. Only the first ticker gets market data
+### Dataclasses
 
-Even if the plan identifies multiple tickers, the market snapshot is fetched only for the first one.
+The main frozen dataclasses in the repo are:
 
-### 6. Error handling is designed to degrade rather than fail hard
+| Name | Location | Purpose |
+| --- | --- | --- |
+| `AgentConfig` | `src/stock_agent/config.py` | top-level runtime configuration |
+| `AgentResult` | `src/stock_agent/agent.py` | return type of `DeepSearchAgent.run()` |
+| `WebDocument` | `src/stock_agent/tools/web_search.py` | normalized web search result |
+| `MarketSnapshot` | `src/stock_agent/tools/market_data.py` | normalized market data snapshot |
 
-This is pragmatic for a prototype, but it also hides quality issues:
+There is also one test-only dataclass:
 
-- planning falls back to a generic template
-- extraction falls back to empty notes
-- decision generation falls back to `need_more = False`
+| Name | Location | Purpose |
+| --- | --- | --- |
+| `_Msg` | `tests/test_deep_search_graph.py` | fake LLM message container for tests |
 
-This improves robustness while making silent quality regressions more likely.
+### Pydantic and TypedDict Models
 
-### 7. Encoding in existing docs and strings is inconsistent
+The graph logic also relies on non-dataclass schema objects:
 
-Some existing Chinese text in `README.md`, CLI help strings, and error messages appears garbled in the current environment. That does not change the core architecture, but it is a documentation and UX quality issue worth fixing separately.
+| Name | Type | Purpose |
+| --- | --- | --- |
+| `ResearchPlan` | `Pydantic BaseModel` | output schema for planning |
+| `EvidenceNote` | `Pydantic BaseModel` | one evidence item |
+| `EvidenceNotes` | `Pydantic BaseModel` | batch container for extraction |
+| `FollowupDecision` | `Pydantic BaseModel` | decision output after evidence review |
+| `DeepSearchState` | `TypedDict` | logical shape of graph state |
+
+### DeepSearchState
+
+The graph state may contain:
+
+```python
+{
+    "query": str,
+    "iteration": int,
+    "max_iterations": int,
+    "plan": dict,
+    "subqueries": list[str],
+    "sources": list[dict],
+    "notes": list[dict],
+    "market": dict,
+    "need_more": bool,
+    "followup_queries": list[str],
+    "missing_angles": list[str],
+    "final_report": str,
+}
+```
+
+Important distinction: `DeepSearchState` is only the type definition. The actual runtime state is a regular Python `dict` managed by LangGraph.
+
+There are effectively three views of state in the project:
+
+1. The `TypedDict` schema in the graph file
+2. The real runtime `dict` LangGraph mutates across nodes
+3. A CLI-side shadow `state` rebuilt from streamed updates to print before/after summaries
+
+Only the second one is authoritative.
+
+## Workflow and Node Contracts
+
+### `plan`
+
+Responsibility:
+
+- convert a raw user question into a `ResearchPlan`
+
+Primary input:
+
+```python
+{"query": str}
+```
+
+Typical output:
+
+```python
+{
+    "plan": {
+        "topic": str,
+        "tickers": list[str],
+        "subqueries": list[str],
+        "assumptions": list[str],
+    },
+    "subqueries": list[str],
+    "iteration": 0,
+    "need_more": False,
+    "followup_queries": [],
+    "missing_angles": [],
+    "sources": [],
+    "notes": [],
+}
+```
+
+Current behavior:
+
+- asks for 6-10 English subqueries
+- truncates `subqueries` to at most 10
+- falls back to a generic hardcoded plan if structured generation fails
+
+### `market`
+
+Responsibility:
+
+- fetch a market snapshot for the first detected ticker
+
+Primary input:
+
+```python
+{
+    "plan": {
+        "tickers": list[str],
+    }
+}
+```
+
+Output:
+
+```python
+{
+    "market": {
+        "ticker": str,
+        "currency": str | None,
+        "price": float | None,
+        "market_cap": float | None,
+        "trailing_pe": float | None,
+        "forward_pe": float | None,
+        "dividend_yield": float | None,
+    }
+}
+```
+
+or:
+
+```python
+{"market": {}}
+```
+
+Current behavior:
+
+- uses only `tickers[0]`
+- does not fail if no ticker is found
+
+### `search_web`
+
+Responsibility:
+
+- execute search queries and append normalized sources to state
+
+Primary input:
+
+```python
+{
+    "iteration": int,
+    "subqueries": list[str],
+    "followup_queries": list[str],
+    "sources": list[dict],
+}
+```
+
+Query selection rules:
+
+- if `iteration == 0`, use `subqueries`
+- if `iteration > 0` and `followup_queries` is non-empty, prefer `followup_queries`
+
+Output:
+
+```python
+{
+    "sources": [
+        {
+            "id": int,
+            "title": str,
+            "url": str,
+            "content": str,
+        }
+    ]
+}
+```
+
+Current behavior:
+
+- aggregates raw search results across all active queries
+- keeps at most 12 selected docs per pass
+- deduplicates new sources by URL against existing state
+- truncates stored source content to roughly 2400 characters
+
+### `extract`
+
+Responsibility:
+
+- convert source snippets into evidence notes
+
+Primary input:
+
+```python
+{
+    "sources": [
+        {
+            "id": int,
+            "title": str,
+            "url": str,
+            "content": str,
+        }
+    ],
+    "notes": [
+        {
+            "source_id": int,
+            "claim": str,
+            "why_it_matters": str,
+        }
+    ],
+}
+```
+
+Output when work is available:
+
+```python
+{
+    "notes": [
+        {
+            "source_id": int,
+            "claim": str,
+            "why_it_matters": str,
+        }
+    ]
+}
+```
+
+Output when there is no eligible batch:
+
+```python
+{}
+```
+
+Current behavior:
+
+- processes at most 8 previously unseen sources per pass
+- merges newly generated notes with existing notes
+- asks the model for no more than 2 items per source, but that limit is prompt-level rather than code-enforced
+- falls back to an empty extraction result on failure
+
+### `decide`
+
+Responsibility:
+
+- judge whether the evidence is sufficient for a memo
+- generate follow-up search queries if not
+
+Primary input:
+
+```python
+{
+    "iteration": int,
+    "plan": {...},
+    "notes": [...],
+    "sources": [...],
+    "market": {...},
+}
+```
+
+Output:
+
+```python
+{
+    "need_more": bool,
+    "followup_queries": list[str],
+    "missing_angles": list[str],
+    "iteration": int,
+}
+```
+
+Current behavior:
+
+- increments `iteration` by 1
+- generates 3-6 follow-up queries when evidence is insufficient
+- falls back to:
+
+```python
+{
+    "need_more": False,
+    "followup_queries": [],
+    "missing_angles": ["structured parsing failed"],
+    "iteration": current_iteration + 1,
+}
+```
+
+### `write_report`
+
+Responsibility:
+
+- produce the final English memo
+
+Primary input:
+
+```python
+{
+    "plan": {...},
+    "notes": [...],
+    "sources": [...],
+    "market": {...},
+}
+```
+
+Output:
+
+```python
+{"final_report": str}
+```
+
+Current behavior:
+
+- requires an English memo
+- requires the following sections:
+  - Executive Summary
+  - Bull Case
+  - Bear Case
+  - Key Catalysts
+  - Key Risks
+  - Open Questions
+  - Sources
+- requires `[S#]` citations after key claims
+- ends with the research-only disclaimer
+
+### Routing Logic
+
+The routing function is:
+
+```python
+route_after_decide(state: DeepSearchState) -> str
+```
+
+Input:
+
+```python
+{
+    "need_more": bool,
+    "iteration": int,
+    "max_iterations": int,
+}
+```
+
+Output:
+
+- `"search_web"` when more evidence is needed and the loop limit has not been reached
+- `"write_report"` otherwise
+
+## State Lifecycle and Merge Semantics
+
+The project does not use a special append-aware state reducer for `sources` or `notes`. In practice, the semantics are close to:
+
+```python
+current_state = {...}
+update = node(current_state)
+current_state = {**current_state, **update}
+```
+
+That means simple scalar fields are overwritten directly by node output. For list-like fields such as `sources` and `notes`, the append logic is implemented manually inside the node itself.
+
+Current ownership looks like this:
+
+| Field | Merge Behavior | Owned By |
+| --- | --- | --- |
+| `plan` | overwrite/write once | `plan_node` |
+| `subqueries` | overwrite/write once | `plan_node` |
+| `iteration` | overwrite | `plan_node`, `decide_node` |
+| `need_more` | overwrite | `plan_node`, `decide_node` |
+| `followup_queries` | overwrite | `plan_node`, `decide_node` |
+| `missing_angles` | overwrite | `plan_node`, `decide_node` |
+| `market` | overwrite | `market_node` |
+| `final_report` | overwrite/write once | `write_node` |
+| `sources` | manual merge, then overwrite full list | `search_node` |
+| `notes` | manual merge, then overwrite full list | `extract_node` |
+
+This is important when extending the graph. For example:
+
+- `search_node` currently returns `{"sources": existing + new_sources}`
+- `extract_node` currently returns `{"notes": merged}`
+
+If a future change returned only incremental results, the old values would be replaced rather than automatically appended.
+
+## Supporting Modules
+
+### Model Layer
+
+[`src/stock_agent/llm.py`](../src/stock_agent/llm.py) creates the chat model. The implementation uses:
+
+- OpenAI directly when `OPENAI_API_KEY` is available and DeepSeek is not configured
+- DeepSeek through an OpenAI-compatible base URL when `DEEPSEEK_API_KEY` is present
+
+One key implementation detail is in the graph builder:
+
+- OpenAI path uses `with_structured_output(...)`
+- DeepSeek path uses manual JSON prompting and `_extract_json_object()`
+
+So structured-output reliability is provider-dependent.
+
+### Web Search Layer
+
+[`src/stock_agent/tools/web_search.py`](../src/stock_agent/tools/web_search.py) defines:
+
+```python
+web_search(query: str, max_results: int = 5, timeout_s: int = 25) -> List[WebDocument]
+```
+
+Behavior:
+
+- prefers Tavily when `TAVILY_API_KEY` exists
+- falls back to DuckDuckGo otherwise
+- normalizes both backends into `WebDocument`
+
+The helper:
+
+```python
+pick_best_docs(
+    docs: List[WebDocument],
+    *,
+    limit: int = 6,
+    require_url: bool = True,
+) -> List[WebDocument]
+```
+
+works by:
+
+- preserving input order
+- deduplicating by URL or title
+- optionally requiring a URL
+- stopping at `limit`
+
+There is no authority or freshness scoring beyond backend order.
+
+### Market Data Layer
+
+[`src/stock_agent/tools/market_data.py`](../src/stock_agent/tools/market_data.py) defines:
+
+```python
+fetch_market_snapshot(ticker: str) -> MarketSnapshot
+```
+
+Behavior:
+
+- reads from `yfinance.Ticker(ticker).info`
+- attempts to normalize:
+  - `currency`
+  - `currentPrice` or `regularMarketPrice`
+  - `marketCap`
+  - `trailingPE`
+  - `forwardPE`
+  - `dividendYield`
+- degrades to `None` values when parsing fails
+- degrades to an empty `info` dict when `t.info` raises
 
 ## Testing Status
 
 Automated test coverage is minimal.
 
-[`tests/test_deep_search_graph.py`](../tests/test_deep_search_graph.py) contains one main offline graph test that:
+[`tests/test_deep_search_graph.py`](../tests/test_deep_search_graph.py) provides an offline smoke test that:
 
 - injects a fake LLM
 - stubs `web_search()`
 - builds the graph with a small config
-- verifies the graph can run without network access
+- runs the graph without network access
 - asserts that a report, one source, and one note are produced
 
-This test is useful as a smoke test, but it does not cover:
+The test is useful, but it does not cover:
 
-- CLI behavior
-- real provider integration
-- Tavily vs DuckDuckGo fallback differences
+- CLI rendering behavior
+- real OpenAI or DeepSeek integration
+- Tavily vs DuckDuckGo behavior differences
 - market data edge cases
-- multi-iteration loop behavior under realistic evidence gaps
-- structured-output parsing failure scenarios
-- final report quality or citation consistency
+- multi-iteration loop behavior in realistic failure scenarios
+- parsing failures across all schema types
+- report quality or citation consistency
+
+## Current Limitations and Design Notes
+
+Several limitations are structural, not accidental.
+
+### No web service layer
+
+The repo does not currently include:
+
+- a REST API
+- a FastAPI or Flask wrapper
+- OpenAPI or Swagger docs
+- a WebSocket streaming interface
+
+If the project later needs networked access, a service layer should be added on top of `DeepSearchAgent` rather than mixed directly into graph logic.
+
+### Output language is intentionally English
+
+Even though some local docs and CLI strings include Chinese, the prompts explicitly require English output for:
+
+- planning
+- extraction
+- decision-making
+- final memo writing
+
+### The system prefers robustness over strict quality control
+
+The graph is designed to degrade rather than fail hard:
+
+- planning can fall back to a generic plan
+- extraction can fall back to empty notes
+- decision-making can fall back to a terminal decision
+
+This keeps the workflow runnable, but it also means low-quality intermediate results can still produce a final memo.
+
+### Source handling is shallow
+
+Search results are deduplicated and truncated, but not strongly filtered by:
+
+- primary vs. secondary sources
+- domain quality
+- recency
+- conflict resolution
+
+That makes output quality sensitive to backend result ordering.
+
+### Market enrichment is single-ticker only
+
+Only the first ticker in `plan.tickers` is used for market data.
+
+### State is in-memory only
+
+There is no persistence, resume support, or checkpointing. During `run()` and `stream()`, the state exists only in memory unless the caller saves the returned result explicitly.
+
+### Package exports are small
+
+The package root exports very little, so the stable import style is:
+
+```python
+from stock_agent.agent import DeepSearchAgent
+from stock_agent.config import AgentConfig
+```
+
+rather than relying on root-level re-exports.
 
 ## Dependency Snapshot
 
-From [`pyproject.toml`](../pyproject.toml), the main runtime dependencies are:
+The main runtime dependencies from [pyproject.toml](../pyproject.toml) are:
 
 - `langgraph`
 - `langchain-core`
@@ -354,15 +736,15 @@ From [`pyproject.toml`](../pyproject.toml), the main runtime dependencies are:
 - `yfinance`
 - `rich`
 
-Development dependencies currently include only:
+Development dependencies currently include:
 
 - `pytest`
 
-This aligns with the overall design: a lightweight CLI research agent with a small implementation surface.
+This matches the project’s shape: a lightweight graph-driven research agent with a CLI-first surface.
 
-## Practical Read of the Repo
+## Practical Reading Order
 
-If you want to understand the project quickly, these are the highest-value files to read in order:
+For a fast understanding of the repo, read these files in order:
 
 1. [README.md](../README.md)
 2. [`src/stock_agent/cli.py`](../src/stock_agent/cli.py)
@@ -374,6 +756,6 @@ If you want to understand the project quickly, these are the highest-value files
 
 ## Summary
 
-`stock-agent` is a focused research-agent prototype with a clear graph-driven design and a small codebase. Its main strengths are simplicity, readability, and an explicit research workflow. Its main weaknesses are shallow evidence handling, provider-dependent structured output behavior, limited source-quality control, and minimal testing.
+`stock-agent` is a compact research-agent prototype with a clear graph-driven architecture and a small implementation surface. Its strengths are simplicity, readability, and explicit workflow design. Its current weak points are shallow source selection, provider-dependent structured output behavior, limited evidence processing depth, lack of persistence, and minimal tests.
 
-That makes it a good foundation for experimentation and iteration, but not yet a production-grade investment research system.
+It is a solid base for iteration, but it is not yet a production-grade investment research platform or service API.
