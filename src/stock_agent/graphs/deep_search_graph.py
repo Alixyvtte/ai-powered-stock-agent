@@ -128,7 +128,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             "You are an equity research analyst. Convert the user's question into an executable research plan.\n"
             "Requirements:\n"
             "1) Output must strictly follow the structured schema fields.\n"
-            "2) Provide 6-10 subqueries that cover: business & competition, financials & valuation, catalysts,\n"
+            "2) Provide 3-5 subqueries that cover: business & competition, financials & valuation, catalysts,\n"
             "   risks, regulation/litigation, macro & industry.\n"
             "3) tickers can be empty if uncertain.\n"
             "4) Provide 3-6 key assumptions / uncertainties to validate.\n"
@@ -163,7 +163,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
                     "Cross-check key claims across multiple independent sources.",
                 ],
             )
-        subqueries = plan.subqueries[:10]
+        subqueries = plan.subqueries[:4]
         _logger.info("plan:done seconds=%.2f subqueries=%d", time.time() - t0, len(subqueries))
         return {
             "plan": plan.model_dump(),
@@ -204,7 +204,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         
         # 极速模式：一次性并发所有查询，大幅降低超时时间，拿到什么算什么
         # 不再使用休眠和批处理，以最快速度完成该节点
-        fast_timeout = min(cfg.timeout_s, 10) # 搜索最多给 10 秒
+        fast_timeout = min(cfg.timeout_s, 25) # 搜索最多给 25 秒
         
         # 即使是被超时截断的数据，我们也会尝试从中挑出最好的一批
         # 所以不需要等待全部完成
@@ -218,7 +218,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             # 使用带超时的 wait，强制截断
             done, not_done = concurrent.futures.wait(
                 future_to_query.keys(),
-                timeout=fast_timeout + 2  # 12 秒内必须结束整个 search_node 的并发
+                timeout=fast_timeout + 2  # 27 秒内必须结束整个 search_node 的并发
             )
             
             for future in done:
@@ -232,7 +232,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
                 _logger.warning(f"search_web: query timed out: {future_to_query[future]}")
                 future.cancel()
                 
-        picked = pick_best_docs(all_docs, limit=12)
+        picked = pick_best_docs(all_docs, limit=6)
         existing = state.get("sources") or []
         existing_urls = {s.get("url") for s in existing if s.get("url")}
         new_sources: List[Dict[str, Any]] = []
@@ -267,7 +267,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             s
             for s in sources
             if s.get("id") not in seen_source_ids and (s.get("content") or "").strip()
-        ][:8]
+        ][:4]
         if not batch:
             _logger.info("extract:done seconds=%.2f batch=0", time.time() - t0)
             return {}
@@ -309,7 +309,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         _logger.info("decide:start iteration=%d sources=%d notes=%d", iteration, len(sources), len(notes))
         prompt = (
             "You are a rigorous research assistant. Decide whether the current evidence is sufficient for a high-quality research memo.\n"
-            "If insufficient, provide 3-6 followup_queries to fill the gaps (e.g., latest earnings call highlights,\n"
+            "If insufficient, provide 1-3 followup_queries to fill the gaps (e.g., latest earnings call highlights,\n"
             "regulation, key customers/supply chain, competitors, valuation anchors).\n"
             "Do NOT repeat existing subqueries.\n"
             "Write in English.\n"
