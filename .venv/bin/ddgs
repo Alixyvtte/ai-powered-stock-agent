@@ -1,6 +1,0 @@
-#!/Users/bytedance/Desktop/CS5260-Stock_Agent/.venv/bin/python3
-import sys
-from duckduckgo_search.cli import safe_entry_point
-if __name__ == '__main__':
-    sys.argv[0] = sys.argv[0].removesuffix('.exe')
-    sys.exit(safe_entry_point())
