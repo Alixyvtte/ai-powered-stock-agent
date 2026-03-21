@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-from typing import List, Optional
+import requests
+import concurrent.futures
+import logging
+from typing import List, Optional, Dict, Any
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class WebDocument:
@@ -13,52 +17,175 @@ class WebDocument:
 
 
 def _search_tavily(query: str, max_results: int, timeout_s: int) -> List[WebDocument]:
-    from tavily import TavilyClient
-
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
         return []
 
-    client = TavilyClient(api_key=api_key)
-    resp = client.search(
-        query=query,
-        max_results=max_results,
-        include_raw_content=True,
-    )
-    results = resp.get("results", []) if isinstance(resp, dict) else []
-    docs: List[WebDocument] = []
-    for r in results:
-        title = (r.get("title") or "").strip()
-        url = (r.get("url") or "").strip()
-        content = (r.get("raw_content") or r.get("content") or "").strip()
-        if not (title or url or content):
-            continue
-        docs.append(WebDocument(title=title or url, url=url, content=content))
-    return docs
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=api_key)
+        resp = client.search(
+            query=query,
+            max_results=max_results,
+            include_raw_content=True,
+        )
+        results = resp.get("results", []) if isinstance(resp, dict) else []
+        docs: List[WebDocument] = []
+        for r in results:
+            title = (r.get("title") or "").strip()
+            url = (r.get("url") or "").strip()
+            content = (r.get("raw_content") or r.get("content") or "").strip()
+            if not (title or url or content):
+                continue
+            docs.append(WebDocument(title=title or url, url=url, content=content))
+        return docs
+    except Exception as e:
+        logger.warning(f"Tavily search failed: {e}")
+        return []
+
+
+
+
+
+def _search_serper(query: str, max_results: int, timeout_s: int) -> List[WebDocument]:
+    serper_key = os.getenv("SERPER_API_KEY")
+    if not serper_key:
+        return []
+    
+    headers = {
+        "X-API-KEY": serper_key,
+        "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.post("https://google.serper.dev/search", headers=headers, json={"q": query, "num": max_results}, timeout=timeout_s)
+        if resp.status_code == 200:
+            results = resp.json().get("organic", [])
+            docs: List[WebDocument] = []
+            for r in results[:max_results]:
+                title = (r.get("title") or "").strip()
+                url = (r.get("link") or "").strip()
+                content = (r.get("snippet") or "").strip()
+                if title or url or content:
+                    docs.append(WebDocument(title=title or url, url=url, content=content))
+            return docs
+    except Exception as e:
+        logger.warning(f"Serper search failed: {e}")
+    return []
+
+
+def _search_serpapi(query: str, max_results: int, timeout_s: int) -> List[WebDocument]:
+    serpapi_key = os.getenv("SERPAPI_KEY")
+    if not serpapi_key:
+        return []
+    
+    try:
+        resp = requests.get("https://serpapi.com/search.json", params={"q": query, "api_key": serpapi_key, "num": max_results}, timeout=timeout_s)
+        if resp.status_code == 200:
+            results = resp.json().get("organic_results", [])
+            docs: List[WebDocument] = []
+            for r in results[:max_results]:
+                title = (r.get("title") or "").strip()
+                url = (r.get("link") or "").strip()
+                content = (r.get("snippet") or "").strip()
+                if title or url or content:
+                    docs.append(WebDocument(title=title or url, url=url, content=content))
+            return docs
+    except Exception as e:
+        logger.warning(f"SerpApi search failed: {e}")
+    return []
+
+
+
 
 
 def _search_duckduckgo(query: str, max_results: int) -> List[WebDocument]:
-    from duckduckgo_search import DDGS
-
     docs: List[WebDocument] = []
-    with DDGS() as ddgs:
-        for r in ddgs.text(query, max_results=max_results):
-            title = (r.get("title") or "").strip()
-            url = (r.get("href") or "").strip()
-            body = (r.get("body") or "").strip()
-            if not (title or url or body):
-                continue
-            docs.append(WebDocument(title=title or url, url=url, content=body))
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=max_results):
+                title = (r.get("title") or "").strip()
+                url = (r.get("href") or "").strip()
+                body = (r.get("body") or "").strip()
+                if not (title or url or body):
+                    continue
+                docs.append(WebDocument(title=title or url, url=url, content=body))
+    except Exception as e:
+        logger.warning(f"DuckDuckGo search failed: {e}")
     return docs
 
 
 def web_search(query: str, max_results: int = 5, timeout_s: int = 25) -> List[WebDocument]:
-    tavily_key = os.getenv("TAVILY_API_KEY")
-    if tavily_key:
-        docs = _search_tavily(query=query, max_results=max_results, timeout_s=timeout_s)
-        if docs:
-            return docs
-    return _search_duckduckgo(query=query, max_results=max_results)
+    """
+    Executes a web search across multiple available providers concurrently.
+    Optimized for agent usage: uses Tavily, Serper, SerpApi, and falls back to DuckDuckGo.
+    """
+    funcs = []
+    
+    # 优先加入速度快、内容丰富的 SerpApi 和 Tavily
+    if os.getenv("SERPAPI_KEY"):
+        funcs.append(_search_serpapi)
+    if os.getenv("TAVILY_API_KEY"):
+        funcs.append(_search_tavily)
+        
+    if os.getenv("SERPER_API_KEY") and not os.getenv("SERPAPI_KEY"):
+        funcs.append(_search_serper)
+        
+    all_docs: List[WebDocument] = []
+    
+    if funcs:
+        provider_results: Dict[Any, List[WebDocument]] = {func: [] for func in funcs}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(funcs) * 2) as executor:
+            future_to_func = {}
+            for func in funcs:
+                future = executor.submit(func, query, max_results, timeout_s)
+                future_to_func[future] = func
+                
+            # 设置总的超时时间，防止被某个很慢的 API 阻塞太久
+            done, not_done = concurrent.futures.wait(
+                future_to_func.keys(), 
+                timeout=timeout_s + 2
+            )
+            
+            for future in done:
+                func = future_to_func[future]
+                try:
+                    docs = future.result()
+                    if docs:
+                        provider_results[func] = docs
+                except Exception as e:
+                    logger.warning(f"Provider failed: {e}")
+                    
+            for future in not_done:
+                logger.warning(f"Provider {future_to_func[future].__name__} timed out")
+                future.cancel()
+                    
+        # Interleave results to maintain relevance priority from each provider
+        max_len = max((len(docs) for docs in provider_results.values()), default=0)
+        for i in range(max_len):
+            for func in funcs: # Use original funcs order for priority
+                docs = provider_results[func]
+                if i < len(docs):
+                    all_docs.append(docs[i])
+    else:
+        # Fallback if no keys are set
+        all_docs = _search_duckduckgo(query, max_results)
+
+    # Deduplicate by URL (and title) preserving the interleaved order
+    seen_urls: set[str] = set()
+    unique_docs: List[WebDocument] = []
+    
+    for d in all_docs:
+        key = d.url if d.url else d.title
+        if not key or key in seen_urls:
+            continue
+        seen_urls.add(key)
+        unique_docs.append(d)
+        
+    # Limit to max_results before returning
+    final_docs = unique_docs[:max_results]
+
+    return final_docs
 
 
 def pick_best_docs(

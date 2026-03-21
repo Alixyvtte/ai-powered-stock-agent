@@ -198,9 +198,40 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         _logger.info("search_web:start iteration=%d queries=%d", iteration, len(active_queries))
         max_results = cfg.max_results_per_query
         all_docs: List[WebDocument] = []
-        for sq in active_queries:
-            docs = web_search(sq, max_results=max_results, timeout_s=cfg.timeout_s)
-            all_docs.extend(docs)
+        
+        # 并发执行所有查询，极大地加快 search 阶段的速度
+        import concurrent.futures
+        
+        # 极速模式：一次性并发所有查询，大幅降低超时时间，拿到什么算什么
+        # 不再使用休眠和批处理，以最快速度完成该节点
+        fast_timeout = min(cfg.timeout_s, 10) # 搜索最多给 10 秒
+        
+        # 即使是被超时截断的数据，我们也会尝试从中挑出最好的一批
+        # 所以不需要等待全部完成
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(active_queries))) as executor:
+            future_to_query = {
+                executor.submit(web_search, sq, max_results=max_results, timeout_s=fast_timeout): sq
+                for sq in active_queries
+            }
+            
+            # 使用带超时的 wait，强制截断
+            done, not_done = concurrent.futures.wait(
+                future_to_query.keys(),
+                timeout=fast_timeout + 2  # 12 秒内必须结束整个 search_node 的并发
+            )
+            
+            for future in done:
+                try:
+                    docs = future.result()
+                    all_docs.extend(docs)
+                except Exception as e:
+                    _logger.warning(f"search_web: query failed: {e}")
+                    
+            for future in not_done:
+                _logger.warning(f"search_web: query timed out: {future_to_query[future]}")
+                future.cancel()
+                
         picked = pick_best_docs(all_docs, limit=12)
         existing = state.get("sources") or []
         existing_urls = {s.get("url") for s in existing if s.get("url")}

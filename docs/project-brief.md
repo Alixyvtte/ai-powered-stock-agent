@@ -167,9 +167,14 @@ The model client is built in [`src/stock_agent/llm.py`](../src/stock_agent/llm.p
 
 Additional environment variables:
 
+- `SERPAPI_KEY`
+  - If present, web search prioritizes Google SerpApi.
 - `TAVILY_API_KEY`
-  - If present, web search prefers Tavily.
-  - Otherwise the code falls back to DuckDuckGo.
+  - If present, web search includes Tavily.
+- `SERPER_API_KEY`
+  - If present, web search includes Google Serper (as a fallback for SerpApi).
+- Fallback:
+  - If no API keys are provided, the code falls back to DuckDuckGo.
 - `STOCK_AGENT_MAX_ITERATIONS`
   - Maximum allowed `search_web -> extract -> decide` loop count.
   - Default: `2`
@@ -591,9 +596,11 @@ web_search(query: str, max_results: int = 5, timeout_s: int = 25) -> List[WebDoc
 
 Behavior:
 
-- prefers Tavily when `TAVILY_API_KEY` exists
-- falls back to DuckDuckGo otherwise
-- normalizes both backends into `WebDocument`
+- Executes search concurrently prioritizing fast providers (SerpApi, Tavily, Serper).
+- Utilizes an aggressive fast-timeout truncation mechanism (cutting off at ~10s) to guarantee high-speed agent execution over exhaustive retrieval.
+- Interleaves results to maintain original provider relevance ranking.
+- Falls back to DuckDuckGo if no search API keys are available.
+- Normalizes all backend results into `WebDocument`.
 
 The helper:
 
@@ -741,6 +748,8 @@ Development dependencies currently include:
 - `pytest`
 
 This matches the project’s shape: a lightweight graph-driven research agent with a CLI-first surface.
+
+**Note:** The search module leverages the built-in `concurrent.futures` and `requests` for fast, parallel search with timeout truncation across providers like SerpApi, Tavily, and Serper.
 
 ## Practical Reading Order
 
