@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import StateGraph, END
@@ -49,6 +50,7 @@ class DeepSearchState(TypedDict, total=False):
     subqueries: List[str]
     sources: List[Dict[str, Any]]
     notes: List[Dict[str, Any]]
+    processed_source_ids: List[int]
     market: Dict[str, Any]
     need_more: bool
     followup_queries: List[str]
@@ -57,6 +59,58 @@ class DeepSearchState(TypedDict, total=False):
 
 
 _logger = logging.getLogger("stock_agent.trace")
+_EXTRACT_BATCH_SIZE = 8
+_MAX_NOTES_PER_SOURCE = 2
+_HIGH_SIGNAL_HOST_HINTS = (
+    "sec.gov",
+    "investor",
+    "ir.",
+    "newsroom",
+    "reuters.com",
+    "bloomberg.com",
+    "wsj.com",
+    "ft.com",
+    "apnews.com",
+    "earningscalltranscript.com",
+)
+_HIGH_SIGNAL_TEXT_HINTS = (
+    "earnings call",
+    "transcript",
+    "shareholder letter",
+    "form 10-k",
+    "form 10-q",
+    "annual report",
+    "quarterly report",
+    "press release",
+)
+_LOW_SIGNAL_HINTS = (
+    "motleyfool",
+    "fool.com",
+    "zacks.com",
+    "investorplace.com",
+    "tipranks.com",
+    "list of",
+    "top stocks",
+    "best stocks",
+    "price prediction",
+)
+_VAGUE_CLAIM_PREFIXES = (
+    "the article",
+    "this article",
+    "the source",
+    "this source",
+    "the page",
+    "this page",
+    "the report",
+    "this report",
+)
+_GENERIC_CLAIMS = {
+    "evidence",
+    "analysis",
+    "research",
+    "update",
+    "news",
+}
 
 
 def _truncate(text: str, limit: int = 2200) -> str:
@@ -113,6 +167,86 @@ def _invoke_model_json(llm, schema: type[BaseModel], prompt: str) -> BaseModel:
             last_err = str(e)
             continue
     raise RuntimeError(f"Failed to parse valid JSON for {schema.__name__}: {last_err}")
+
+
+def _normalize_text(text: str) -> str:
+    return " ".join((text or "").strip().lower().split())
+
+
+def _source_host(url: str) -> str:
+    if not url:
+        return ""
+    return urlparse(url).netloc.lower().removeprefix("www.")
+
+
+def _source_priority(source: Dict[str, Any]) -> tuple[int, int]:
+    source_id = int(source.get("id") or 0)
+    host = _source_host(str(source.get("url") or ""))
+    title = (source.get("title") or "").lower()
+    content = (source.get("content") or "").lower()[:500]
+    blob = f"{host} {title} {content}"
+    score = 0
+
+    if host and any(hint in host for hint in _HIGH_SIGNAL_HOST_HINTS):
+        score += 4
+    if any(hint in blob for hint in _HIGH_SIGNAL_TEXT_HINTS):
+        score += 2
+    if host and any(hint in host for hint in _LOW_SIGNAL_HINTS):
+        score -= 3
+    if any(hint in blob for hint in _LOW_SIGNAL_HINTS):
+        score -= 2
+    if source.get("url"):
+        score += 1
+    if len((source.get("content") or "").strip()) < 120:
+        score -= 1
+
+    return (-score, source_id)
+
+
+def _is_meaningful_note(claim: str, why_it_matters: str, title: str) -> bool:
+    claim_norm = _normalize_text(claim)
+    why_norm = _normalize_text(why_it_matters)
+    title_norm = _normalize_text(title)
+
+    if not claim_norm or not why_norm:
+        return False
+    if len(claim_norm) < 18 or len(claim_norm.split()) < 4:
+        return False
+    if len(why_norm) < 12 or len(why_norm.split()) < 3:
+        return False
+    if claim_norm in _GENERIC_CLAIMS or claim_norm == title_norm:
+        return False
+    if any(claim_norm.startswith(prefix) for prefix in _VAGUE_CLAIM_PREFIXES):
+        return False
+    return True
+
+
+def _extract_source_notes(
+    llm: Any,
+    *,
+    use_structured: bool,
+    topic: str,
+    source: Dict[str, Any],
+) -> EvidenceNotes:
+    prompt = (
+        "You are extracting evidence for an equity research workflow.\n"
+        f"Research topic: {topic}\n"
+        "Review exactly one source and return up to 2 evidence items for that source only.\n"
+        "Rules:\n"
+        "- Keep source_id exactly as provided.\n"
+        "- claim must be a concrete, checkable fact or a specific attributable viewpoint from the source.\n"
+        "- why_it_matters must explain the investing relevance in one sentence.\n"
+        "- Do not restate the page title or provide a generic summary.\n"
+        "- If the source is off-topic, low-signal, or has no usable evidence, return items as an empty list.\n"
+        "Write in English.\n"
+        "Source:\n"
+        f"[source_id={source['id']}] {source.get('title', '')}\n"
+        f"URL: {source.get('url', '')}\n"
+        f"CONTENT:\n{source.get('content', '')}\n"
+    )
+    if use_structured:
+        return llm.with_structured_output(EvidenceNotes).invoke(prompt)
+    return _invoke_model_json(llm, EvidenceNotes, prompt)
 
 
 def build_deep_search_graph(config: Optional[AgentConfig] = None):
@@ -174,6 +308,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             "missing_angles": [],
             "sources": [],
             "notes": [],
+            "processed_source_ids": [],
         }
 
     def market_node(state: DeepSearchState) -> DeepSearchState:
@@ -260,44 +395,88 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
     def extract_node(state: DeepSearchState) -> DeepSearchState:
         t0 = time.time()
         _logger.info("extract:start")
+        plan_data = state.get("plan") or {"topic": state.get("query") or "Equity research"}
+        plan = ResearchPlan.model_validate(plan_data)
         sources = state.get("sources") or []
         notes_existing = state.get("notes") or []
-        seen_source_ids = {n.get("source_id") for n in notes_existing}
-        batch = [
+        processed_source_ids = [int(v) for v in (state.get("processed_source_ids") or []) if v is not None]
+        if not processed_source_ids:
+            processed_source_ids = []
+            for note in notes_existing:
+                source_id = note.get("source_id")
+                if source_id is None:
+                    continue
+                source_id = int(source_id)
+                if source_id not in processed_source_ids:
+                    processed_source_ids.append(source_id)
+        processed_source_id_set = set(processed_source_ids)
+        existing_claim_keys = {
+            _normalize_text(str(n.get("claim") or ""))
+            for n in notes_existing
+            if _normalize_text(str(n.get("claim") or ""))
+        }
+        eligible = [
             s
             for s in sources
-            if s.get("id") not in seen_source_ids and (s.get("content") or "").strip()
-        ][:4]
+            if s.get("id") not in processed_source_id_set and (s.get("content") or "").strip()
+        ]
+        batch = sorted(eligible, key=_source_priority)[:_EXTRACT_BATCH_SIZE]
         if not batch:
             _logger.info("extract:done seconds=%.2f batch=0", time.time() - t0)
             return {}
-        prompt = (
-            "Extract verifiable evidence bullets from the web snippets below.\n"
-            "Each evidence item must reference a source_id.\n"
-            "Rules:\n"
-            "- claim: a checkable fact or a specific, attributable viewpoint (avoid vague statements)\n"
-            "- why_it_matters: explain the investment relevance (catalyst/risk/financial/competitive, etc.)\n"
-            "- Max 2 items per source.\n"
-            "Write in English.\n"
-            "Sources:\n"
+        accepted_notes: List[Dict[str, Any]] = []
+
+        for source in batch:
+            source_id = int(source["id"])
+            title = str(source.get("title") or "")
+            try:
+                out = _extract_source_notes(
+                    llm,
+                    use_structured=use_structured,
+                    topic=plan.topic or (state.get("query") or "Equity research"),
+                    source=source,
+                )
+            except Exception as exc:
+                _logger.warning("extract: source_id=%s failed: %s", source_id, exc)
+                out = EvidenceNotes(items=[])
+
+            for note in out.items:
+                claim = (note.claim or "").strip()
+                why_it_matters = (note.why_it_matters or "").strip()
+                claim_key = _normalize_text(claim)
+                if note.source_id != source_id:
+                    continue
+                if not _is_meaningful_note(claim, why_it_matters, title):
+                    continue
+                if not claim_key or claim_key in existing_claim_keys:
+                    continue
+                existing_claim_keys.add(claim_key)
+                accepted_notes.append(
+                    {
+                        "source_id": source_id,
+                        "claim": claim,
+                        "why_it_matters": why_it_matters,
+                    }
+                )
+                if sum(1 for n in accepted_notes if n["source_id"] == source_id) >= _MAX_NOTES_PER_SOURCE:
+                    break
+
+            if source_id not in processed_source_id_set:
+                processed_source_ids.append(source_id)
+                processed_source_id_set.add(source_id)
+
+        merged = notes_existing + accepted_notes
+        _logger.info(
+            "extract:done seconds=%.2f processed=%d new_notes=%d total_notes=%d",
+            time.time() - t0,
+            len(batch),
+            len(accepted_notes),
+            len(merged),
         )
-        for s in batch:
-            prompt += (
-                f"\n[source_id={s['id']}] {s.get('title','')}\n"
-                f"URL: {s.get('url','')}\n"
-                f"CONTENT:\n{s.get('content','')}\n"
-            )
-        try:
-            out = (
-                llm.with_structured_output(EvidenceNotes).invoke(prompt)
-                if use_structured
-                else _invoke_model_json(llm, EvidenceNotes, prompt)
-            )
-        except Exception:
-            out = EvidenceNotes(items=[])
-        merged = notes_existing + [n.model_dump() for n in out.items]
-        _logger.info("extract:done seconds=%.2f new_notes=%d total_notes=%d", time.time() - t0, len(out.items), len(merged))
-        return {"notes": merged}
+        return {
+            "notes": merged,
+            "processed_source_ids": processed_source_ids,
+        }
 
     def decide_node(state: DeepSearchState) -> DeepSearchState:
         t0 = time.time()
