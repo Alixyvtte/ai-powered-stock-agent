@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ..config import AgentConfig
 from ..llm import get_chat_model
-from ..tools.market_data import fetch_market_snapshot
+from ..tools.market_data import fetch_a_share_snapshot, fetch_market_snapshot
 from ..tools.web_search import WebDocument, pick_best_docs, web_search
 
 
@@ -23,6 +24,16 @@ class ResearchPlan(BaseModel):
         description="Search sub-queries (English preferred)",
     )
     assumptions: List[str] = Field(default_factory=list, description="Key assumptions / uncertainties to validate")
+    market_type: str = Field(
+        default="unknown",
+        description=(
+            "Market type of the query: 'us_equity' for US-listed stocks, "
+            "'a_share' for Chinese A-share stocks (SSE/SZSE), "
+            "'macro' for macroeconomic/rate/currency questions, "
+            "'multi_market' if the query spans multiple markets, "
+            "or 'unknown' if unclear."
+        ),
+    )
 
 
 class EvidenceNote(BaseModel):
@@ -39,6 +50,14 @@ class FollowupDecision(BaseModel):
     need_more: bool
     followup_queries: List[str] = Field(default_factory=list)
     missing_angles: List[str] = Field(default_factory=list)
+    evidence_confidence: str = Field(
+        default="medium",
+        description="Overall evidence quality: 'high', 'medium', 'low', or 'insufficient'.",
+    )
+    refusal_reason: str = Field(
+        default="",
+        description="If evidence_confidence is 'insufficient', explain why a responsible report cannot be written.",
+    )
 
 
 class DeepSearchState(TypedDict, total=False):
@@ -53,6 +72,9 @@ class DeepSearchState(TypedDict, total=False):
     need_more: bool
     followup_queries: List[str]
     missing_angles: List[str]
+    all_missing_angles: List[str]
+    evidence_confidence: str
+    research_timestamp: str
     final_report: str
 
 
@@ -115,6 +137,28 @@ def _invoke_model_json(llm, schema: type[BaseModel], prompt: str) -> BaseModel:
     raise RuntimeError(f"Failed to parse valid JSON for {schema.__name__}: {last_err}")
 
 
+_PRIMARY_DOMAINS = frozenset({
+    "sec.gov", "fred.stlouisfed.org", "bea.gov", "ecb.europa.eu",
+    "stats.bis.org", "csrc.gov.cn", "cninfo.com.cn", "sse.com.cn", "szse.cn",
+})
+_SECONDARY_DOMAINS = frozenset({
+    "reuters.com", "bloomberg.com", "ft.com", "wsj.com",
+    "cls.cn", "cs.com.cn", "cnstock.com",
+})
+
+
+def _classify_source(url: str) -> str:
+    if not url:
+        return "aggregator"
+    for d in _PRIMARY_DOMAINS:
+        if d in url:
+            return "primary"
+    for d in _SECONDARY_DOMAINS:
+        if d in url:
+            return "secondary"
+    return "aggregator"
+
+
 def build_deep_search_graph(config: Optional[AgentConfig] = None):
     cfg = config or AgentConfig.from_env()
     llm = get_chat_model(cfg)
@@ -132,6 +176,10 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             "   risks, regulation/litigation, macro & industry.\n"
             "3) tickers can be empty if uncertain.\n"
             "4) Provide 3-6 key assumptions / uncertainties to validate.\n"
+            "5) Set market_type: 'us_equity' for US-listed stocks, 'a_share' for Chinese A-share stocks\n"
+            "   (SSE/SZSE, 6-digit codes or Chinese company names listed domestically), 'macro' for\n"
+            "   macroeconomic/rate/currency questions, 'multi_market' if the query spans multiple markets,\n"
+            "   or 'unknown' if unclear.\n"
             "Output in English.\n"
             f"User question: {q}"
         )
@@ -147,15 +195,14 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
                 tickers=[],
                 subqueries=[
                     f"{q} business overview competitive landscape",
-                    f"{q} latest earnings call transcript key takeaways",
-                    f"{q} revenue drivers demand outlook next 12 months",
-                    f"{q} margins gross margin drivers cost headwinds",
+                    f"{q} latest earnings financial results key takeaways",
+                    f"{q} revenue growth drivers demand outlook next 12 months",
+                    f"{q} gross margin cost structure headwinds tailwinds",
                     f"{q} valuation multiples peers forward PE EV EBITDA",
                     f"{q} key catalysts next 6-12 months product roadmap",
-                    f"{q} key risks regulation litigation supply chain",
-                    f"{q} customers concentration hyperscalers exposure",
-                    f"{q} competitors market share AMD Intel Apple",
-                    f"{q} macro factors industry cycle inventory",
+                    f"{q} key risks regulatory litigation supply chain",
+                    f"{q} competitor market share industry dynamics",
+                    f"{q} macro factors sector cycle trends",
                 ],
                 assumptions=[
                     "Evidence may be incomplete; validate with primary filings and earnings transcripts.",
@@ -164,7 +211,8 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
                 ],
             )
         subqueries = plan.subqueries[:4]
-        _logger.info("plan:done seconds=%.2f subqueries=%d", time.time() - t0, len(subqueries))
+        research_timestamp = dt.datetime.utcnow().isoformat() + "Z"
+        _logger.info("plan:done seconds=%.2f subqueries=%d market_type=%s", time.time() - t0, len(subqueries), plan.market_type)
         return {
             "plan": plan.model_dump(),
             "subqueries": subqueries,
@@ -172,11 +220,15 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             "need_more": False,
             "followup_queries": [],
             "missing_angles": [],
+            "all_missing_angles": [],
+            "evidence_confidence": "medium",
+            "research_timestamp": research_timestamp,
             "sources": [],
             "notes": [],
         }
 
     def market_node(state: DeepSearchState) -> DeepSearchState:
+        import concurrent.futures
         t0 = time.time()
         _logger.info("market:start")
         plan = ResearchPlan.model_validate(state.get("plan") or {})
@@ -184,10 +236,37 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         if not tickers:
             _logger.info("market:done seconds=%.2f ticker=none", time.time() - t0)
             return {"market": {}}
-        ticker = tickers[0]
-        snap = fetch_market_snapshot(ticker)
-        _logger.info("market:done seconds=%.2f ticker=%s", time.time() - t0, ticker)
-        return {"market": snap.__dict__}
+
+        def _fetch_yf(ticker: str):
+            try:
+                return "yfinance", ticker, fetch_market_snapshot(ticker).__dict__
+            except Exception as e:
+                return "yfinance", ticker, {"ticker": ticker, "error": str(e)}
+
+        def _fetch_ak(ticker: str):
+            try:
+                return "akshare", ticker, fetch_a_share_snapshot(ticker).__dict__
+            except Exception as e:
+                return "akshare", ticker, {"ticker": ticker, "error": str(e)}
+
+        results: Dict[str, Dict[str, Any]] = {t: {} for t in tickers}
+        tasks = [(fn, t) for t in tickers for fn in (_fetch_yf, _fetch_ak)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+            future_map = {executor.submit(fn, t): (fn.__name__, t) for fn, t in tasks}
+            done, not_done = concurrent.futures.wait(future_map.keys(), timeout=15)
+            for future in done:
+                try:
+                    src, ticker, data = future.result()
+                    results[ticker][src] = data
+                except Exception as e:
+                    _logger.warning("market fetch error: %s", e)
+            for future in not_done:
+                fn_name, ticker = future_map[future]
+                _logger.warning("market fetch timed out: %s %s", fn_name, ticker)
+                future.cancel()
+
+        _logger.info("market:done seconds=%.2f tickers=%s", time.time() - t0, list(results.keys()))
+        return {"market": results}
 
     def search_node(state: DeepSearchState) -> DeepSearchState:
         t0 = time.time()
@@ -306,21 +385,41 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         notes = state.get("notes") or []
         sources = state.get("sources") or []
         market = state.get("market") or {}
-        _logger.info("decide:start iteration=%d sources=%d notes=%d", iteration, len(sources), len(notes))
+        prev_followups = list(state.get("followup_queries") or [])
+        prev_missing = list(state.get("all_missing_angles") or [])
+        # Classify sources by credibility tier
+        tier_counts: Dict[str, int] = {"primary": 0, "secondary": 0, "aggregator": 0}
+        for s in sources:
+            tier_counts[_classify_source(s.get("url", ""))] += 1
+
+        _logger.info("decide:start iteration=%d sources=%d notes=%d primary=%d",
+                     iteration, len(sources), len(notes), tier_counts["primary"])
         prompt = (
             "You are a rigorous research assistant. Decide whether the current evidence is sufficient for a high-quality research memo.\n"
-            "If insufficient, provide 1-3 followup_queries to fill the gaps (e.g., latest earnings call highlights,\n"
-            "regulation, key customers/supply chain, competitors, valuation anchors).\n"
-            "Do NOT repeat existing subqueries.\n"
+            "If insufficient, provide 1-3 followup_queries to fill the gaps.\n"
+            "Do NOT repeat any query listed in already_searched_followups or initial_subqueries.\n"
+            "Set evidence_confidence to one of: 'high' (well-supported by primary/secondary sources),\n"
+            "  'medium' (some support but gaps remain), 'low' (mostly aggregators, thin coverage),\n"
+            "  'insufficient' (cannot write a responsible memo — set need_more=false and explain in refusal_reason).\n"
+            "Primary sources (sec.gov, csrc.gov.cn, cninfo.com.cn, fred.stlouisfed.org, etc.) carry the most weight.\n"
             "Write in English.\n"
             f"topic: {plan.topic}\n"
-            f"subqueries: {plan.subqueries}\n"
+            f"initial_subqueries: {plan.subqueries}\n"
+            f"already_searched_followups: {prev_followups}\n"
+            f"key_assumptions_to_validate: {plan.assumptions}\n"
+            f"previously_identified_gaps: {prev_missing}\n"
             f"market_snapshot: {market}\n"
-            f"sources_count: {len(sources)} notes_count: {len(notes)}\n"
+            f"sources_by_tier: primary={tier_counts['primary']} secondary={tier_counts['secondary']} aggregator={tier_counts['aggregator']}\n"
+            f"total_notes: {len(notes)}\n"
+            "For each key assumption, check if the existing notes provide sufficient evidence. "
+            "List unvalidated assumptions as missing_angles.\n"
             "notes (up to 20):\n"
         )
         for n in notes[:20]:
-            prompt += f"- (source {n.get('source_id')}) {n.get('claim')}\n"
+            src_tier = _classify_source(
+                next((s.get("url", "") for s in sources if s.get("id") == n.get("source_id")), "")
+            )
+            prompt += f"- [{src_tier}] (source {n.get('source_id')}) {n.get('claim')} | relevance: {n.get('why_it_matters')}\n"
         try:
             decision = (
                 llm.with_structured_output(FollowupDecision).invoke(prompt)
@@ -328,18 +427,27 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
                 else _invoke_model_json(llm, FollowupDecision, prompt)
             )
         except Exception:
-            decision = FollowupDecision(need_more=False, followup_queries=[], missing_angles=["structured parsing failed"])
+            decision = FollowupDecision(
+                need_more=False,
+                followup_queries=[],
+                missing_angles=["structured parsing failed"],
+                evidence_confidence="low",
+            )
         next_iteration = iteration + 1
+        new_missing = decision.missing_angles
         _logger.info(
-            "decide:done seconds=%.2f need_more=%s followups=%d",
+            "decide:done seconds=%.2f need_more=%s followups=%d confidence=%s",
             time.time() - t0,
             bool(decision.need_more),
             len(decision.followup_queries),
+            decision.evidence_confidence,
         )
         return {
             "need_more": bool(decision.need_more),
             "followup_queries": decision.followup_queries,
-            "missing_angles": decision.missing_angles,
+            "missing_angles": new_missing,
+            "all_missing_angles": prev_missing + new_missing,
+            "evidence_confidence": decision.evidence_confidence,
             "iteration": next_iteration,
         }
 
@@ -350,15 +458,21 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         notes = state.get("notes") or []
         sources = state.get("sources") or []
         market = state.get("market") or {}
+        research_timestamp = state.get("research_timestamp") or "unknown"
+        evidence_confidence = state.get("evidence_confidence") or "medium"
         prompt = (
             "You are an equity research analyst. Write a structured research memo in English based on the evidence.\n"
             "Rules:\n"
             "1) Use only the provided sources/notes. Do NOT fabricate.\n"
             "2) Add citations like [S#] after key statements (e.g., [S3]).\n"
             "3) Must include: Executive Summary, Bull Case, Bear Case, Key Catalysts, Key Risks, Open Questions, Sources.\n"
-            "4) End with: For research purposes only. Not investment advice.\n"
+            f"4) Begin the Executive Summary with: 'Research as of {research_timestamp}.'\n"
+            "5) If evidence_confidence is 'low' or 'insufficient', prominently warn: "
+            "'NOTE: Evidence coverage is limited. Key claims may be unverified. Use with caution.'\n"
+            "6) End with: For research purposes only. Not investment advice.\n"
             f"topic: {plan.topic}\n"
             f"assumptions: {plan.assumptions}\n"
+            f"evidence_confidence: {evidence_confidence}\n"
             f"market_snapshot: {market}\n"
             "notes:\n"
         )
@@ -374,6 +488,10 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
     def route_after_decide(state: DeepSearchState) -> str:
         need_more = bool(state.get("need_more"))
         iteration = int(state.get("iteration") or 0)
+        evidence_confidence = state.get("evidence_confidence") or "medium"
+        # If evidence is fundamentally insufficient, skip further search and write a caveated report
+        if evidence_confidence == "insufficient":
+            return "write_report"
         if need_more and iteration < int(state.get("max_iterations") or cfg.max_iterations):
             return "search_web"
         return "write_report"
