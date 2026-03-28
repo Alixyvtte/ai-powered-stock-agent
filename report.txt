@@ -1,0 +1,130 @@
+╭───────────────────────────── Deep Search Report ─────────────────────────────╮
+│ Executive Summary                                                            │
+│ Research as of 2026-03-21T14:55:05.139672Z.                                  │
+│ - NOTE: Evidence coverage is limited. Key claims may be unverified. Use with │
+│ caution.                                                                     │
+│ - Topic framing: Luxshare Precision (002475) and Goertek (002241) face risk  │
+│ exposure from Apple’s Vision Pro component shipments in a environment        │
+│ characterized by high Fed interest rates. The base assumptions provided      │
+│ imply Vision Pro components represent a non-trivial but not exclusive        │
+│ portion of revenue, and that shipments would track Apple’s messaging         │
+│ guidance. FX movements (notably USD/CNY) are relevant to margins and         │
+│ pass-through ability, but hedging can mitigate part of that risk. Both       │
+│ suppliers have diversified product mixes and meaningful manufacturing        │
+│ capacity to offset Vision Pro exposure, and AR/VR market growth supports a   │
+│ gradual ramp in demand with partial offset from non-Apple customers.         │
+│ Regulatory risks are described as relatively stable in the near term. Given  │
+│ these assumptions, our stance is a nuanced, scenario-based risk review       │
+│ rather than a simple long/short call.                                        │
+│ - Market context (as of the latest snapshot): Luxshare Precision (002475)    │
+│ trades with a market cap around ¥351.3B and a trailing P/E near 22.2;        │
+│ Goertek (002241) around ¥83.1B with a trailing P/E near 27.9. Forward P/Es   │
+│ are in the mid-teens to low-20s for both, and dividend yields are modest     │
+│ (Luxshare ~0.75%, Goertek ~1.71%). These metrics provide a rough relative    │
+│ scale and risk-tatio context for assessing Vision Pro exposure within each   │
+│ supplier’s broader business. [S6]                                            │
+│                                                                              │
+│ Bulleted positions summarize the expected risk/reward under the provided     │
+│ assumptions.                                                                 │
+│                                                                              │
+│ Bull Case                                                                    │
+│ - Vision Pro exposure remains meaningful but not dominant, supported by a    │
+│ diversified customer mix and other Apple components beyond Vision Pro. If    │
+│ Vision Pro shipments grow in line with or modestly ahead of guidance,        │
+│ Luxshare and Goertek benefit from higher component volumes while maintaining │
+│ operating leverage from their broader optoelectronics, sensor, and assembly  │
+│ activities.                                                                  │
+│ - FX hedging mitigates a portion of dollar-strength pass-through costs,      │
+│ allowing gross margin stability even in a high-rate regime. The combination  │
+│ of hedging and the ability to adjust pass-through strategies supports more   │
+│ resilient margins than a pure one-way FX shock scenario.                     │
+│ - Capacity expansion and multi-year contracts with Apple plus a broader      │
+│ AR/VR ecosystem (non-Apple customers) help smooth revenue and reduce         │
+│ reliance on a single program. This could translate into moderate earnings    │
+│ resilience even with some Vision Pro softness.                               │
+│ - Market growth in AR/VR supports a longer-term re-rating for suppliers with │
+│ exposure to premium headset components, especially if Apple’s product        │
+│ cadence reinforces a multi-year upgrade/roadmap cycle.                       │
+│                                                                              │
+│ Bear Case                                                                    │
+│ - Vision Pro shipments stall or miss guidance, causing a material but not    │
+│ catastrophic drop in Vision Pro component orders. For Luxshare and Goertek,  │
+│ this could trigger sharper margin compression if fixed costs remain high or  │
+│ if capacity is involuntarily reallocated away from Vision Pro-related        │
+│ output.                                                                      │
+│ - A sustained, high-rate Fed environment intensifies USD/CNY volatility,     │
+│ potentially squeezing margins if pass-through is slower than anticipated or  │
+│ hedging coverage lapses. Even with hedging, unexpected FX moves can pressure │
+│ earnings, particularly if Vision Pro content is high-margin but quickly      │
+│ reversible.                                                                  │
+│ - Customer concentration and program dependence risk remain non-trivial;     │
+│ while diversification exists, near-term revenues remain sensitive to Apple’s │
+│ timing, product cycle, and any missteps in Vision Pro demand or pricing. A   │
+│ negative Apple trajectory could disproportionately affect these suppliers    │
+│ versus peers with broader exposure outside consumer electronics.             │
+│ - Regulatory dynamics, while currently stable in the near term, could        │
+│ introduce macro costs or supply constraints (e.g., export controls or        │
+│ tariffs) that amplify volatility around Apple-related components.            │
+│                                                                              │
+│ Key Catalysts                                                                │
+│ - Updates to Vision Pro shipments and Apple’s stated guidance, including any │
+│ revisions to expected unit volumes, pricing, or cadence.                     │
+│ - New or renewed component contracts with Apple for Vision Pro and other     │
+│ devices, plus expansion into non-Apple customers (data capture on revenue    │
+│ mix and backlog).                                                            │
+│ - FX hedging policy changes, hedging maturities, and realized hedges that    │
+│ influence margins in a high-rate backdrop.                                   │
+│ - Capacity expansions or product mix shifts that reduce reliance on Vision   │
+│ Pro and increase revenue contribution from other segments.                   │
+│ - AR/VR market data (end-market demand, ASP changes, and competition) that   │
+│ support a sustainable ramp rather than a short-lived bump.                   │
+│                                                                              │
+│ Key Risks                                                                    │
+│ - Vision Pro demand risk: any deviation from Apple’s messaging or            │
+│ slower-than-expected adoption could meaningfully hit component orders.       │
+│ - Customer concentration: Apple remains a large but not exclusive customer;  │
+│ deterioration in Apple’s device roadmap or timing could disproportionately   │
+│ impact Luxshare and Goertek.                                                 │
+│ - FX dynamics: USD/CNY volatility in a high-rate environment affects margins │
+│ and pass-through; hedging helps but is not a complete shield.                │
+│ - Regulatory and tariff environment: regulatory shocks or policy shifts      │
+│ could raise costs or constrain supply chains more than anticipated.          │
+│ - Competitive intensity and supply chain shifts: new entrants, supplier      │
+│ substitutions, or changes in supplier mix could alter bargaining power and   │
+│ pricing dynamics.                                                            │
+│                                                                              │
+│ Open Questions                                                               │
+│ - What is the current share of revenue for Vision Pro components relative to │
+│ total revenue for Luxshare and Goertek, and how has this evolved             │
+│ quarter-by-quarter?                                                          │
+│ - What are the hedging programs (notional amounts, tenors, hedged FX pairs)  │
+│ for USD/CNY, and what is the projected impact on margins under different FX  │
+│ scenarios?                                                                   │
+│ - How diversified are Luxshare and Goertek beyond Apple, in terms of AR/VR   │
+│ components, other device ecosystems, and non-electronics customers?          │
+│ - What are the capacity constraints and capital expenditure plans related to │
+│ Vision Pro exposure (ramp timelines, utilization, and potential              │
+│ bottlenecks)?                                                                │
+│ - What is the revenue backlog for Vision Pro-related components, and what    │
+│ share might be re-allocated if shipments slow?                               │
+│ - How sensitive are margins to incremental Vision Pro volumes versus         │
+│ existing product lines (marginal cost structure, fixed vs. variable costs)?  │
+│ - Are there any near-term regulatory changes anticipated that could impact   │
+│ Apple-supplier relationships or supply-chain costs?                          │
+│                                                                              │
+│ Sources                                                                      │
+│ - Market snapshot data for 002475 (Luxshare Precision) and 002241 (Goertek), │
+│ including price, market cap, trailing/forward P/E, dividend yields, and      │
+│ 52-week ranges (as of 2026-03-21). [S6]                                      │
+│ - TradingView and related notes (S1–S5) — provided as context for tooling    │
+│ and workflow references; not used to substantiate Vision Pro exposure        │
+│ conclusions but listed as official sources accompanying this memo.           │
+│                                                                              │
+│ Note: All analysis above is anchored to the explicit assumptions provided in │
+│ the prompt. Where applicable, statements referencing Vision Pro exposure,    │
+│ revenue mix, and customer concentration reflect those assumptions rather     │
+│ than independently verifiable company disclosures. All quantitative context  │
+│ relies on the market snapshot data cited above.                              │
+│                                                                              │
+│ For research purposes only. Not investment advice.                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
