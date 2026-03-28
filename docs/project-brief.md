@@ -231,6 +231,7 @@ The graph state may contain:
     "subqueries": list[str],
     "sources": list[dict],
     "notes": list[dict],
+    "processed_source_ids": list[int],
     "market": dict,
     "need_more": bool,
     "followup_queries": list[str],
@@ -280,6 +281,7 @@ Typical output:
     "missing_angles": [],
     "sources": [],
     "notes": [],
+    "processed_source_ids": [],
 }
 ```
 
@@ -401,6 +403,7 @@ Primary input:
             "why_it_matters": str,
         }
     ],
+    "processed_source_ids": list[int],
 }
 ```
 
@@ -408,6 +411,7 @@ Output when work is available:
 
 ```python
 {
+    "processed_source_ids": list[int],
     "notes": [
         {
             "source_id": int,
@@ -426,10 +430,13 @@ Output when there is no eligible batch:
 
 Current behavior:
 
-- processes at most 8 previously unseen sources per pass
-- merges newly generated notes with existing notes
-- asks the model for no more than 2 items per source, but that limit is prompt-level rather than code-enforced
-- falls back to an empty extraction result on failure
+- processes at most 8 previously unprocessed sources with non-empty content per pass
+- tracks extraction attempts in `processed_source_ids`, even when a source yields zero notes or a model call fails
+- extracts source-by-source rather than prompting over a mixed batch
+- ranks eligible sources with lightweight quality heuristics before extraction
+- enforces the 2-notes-per-source cap and note validation in code
+- merges newly accepted notes with existing notes and returns the full merged list
+- falls back to an empty extraction result for that source on failure without blocking later sources
 
 ### `decide`
 
@@ -561,12 +568,13 @@ Current ownership looks like this:
 | `market` | overwrite | `market_node` |
 | `final_report` | overwrite/write once | `write_node` |
 | `sources` | manual merge, then overwrite full list | `search_node` |
+| `processed_source_ids` | manual merge, then overwrite full list | `extract_node` |
 | `notes` | manual merge, then overwrite full list | `extract_node` |
 
 This is important when extending the graph. For example:
 
 - `search_node` currently returns `{"sources": existing + new_sources}`
-- `extract_node` currently returns `{"notes": merged}`
+- `extract_node` currently returns `{"notes": merged, "processed_source_ids": processed}`
 
 If a future change returned only incremental results, the old values would be replaced rather than automatically appended.
 
