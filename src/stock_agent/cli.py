@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from .agent import DeepSearchAgent
+from .event_adapter import collect_step_warnings, summarize_step
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,44 +31,50 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     def print_step(node: str, update: dict, state_before: dict, state_after: dict) -> None:
+        summary = summarize_step(node, state_before, state_after)
+        warnings = collect_step_warnings(node, summary)
+
         if node == "plan":
-            topic = ((state_after.get("plan") or {}).get("topic") or "").strip()
-            sq = state_after.get("subqueries") or []
-            console.print(Panel(f"topic: {topic}\nsubqueries: {len(sq)}", title="plan", border_style="cyan"))
-            return
-        if node == "market":
-            m = state_after.get("market") or {}
-            if m:
-                console.print(Panel(json.dumps(m, ensure_ascii=False, indent=2), title="market", border_style="cyan"))
+            lines = [
+                f"topic: {summary['topic']}",
+                f"tickers: {summary['ticker_count']}",
+                f"subqueries: {summary['subquery_count']}",
+            ]
+        elif node == "market":
+            if summary["ticker_count"] == 0:
+                lines = ["no ticker detected"]
             else:
-                console.print(Panel("no ticker detected", title="market", border_style="cyan"))
+                lines = [
+                    f"tickers: {summary['ticker_count']}",
+                    f"covered: {summary['covered_ticker_count']}",
+                    f"with price: {summary['tickers_with_price']}",
+                    f"with market cap: {summary['tickers_with_market_cap']}",
+                ]
+        elif node == "search_web":
+            lines = [
+                f"sources: {summary['total_sources']}",
+                f"new sources: +{summary['new_sources']}",
+            ]
+        elif node == "extract":
+            lines = [
+                f"evidence notes: {summary['total_notes']}",
+                f"new notes: +{summary['new_notes']}",
+            ]
+        elif node == "decide":
+            lines = [
+                f"need_more: {summary['need_more']}",
+                f"followup_queries: {summary['followup_count']}",
+                f"evidence_confidence: {summary['evidence_confidence']}",
+            ]
+        elif node == "write_report":
+            lines = [f"final_report chars: {summary['report_length']}"]
+        else:
+            console.print(Panel(json.dumps(update, ensure_ascii=False, indent=2), title=node, border_style="cyan"))
             return
-        if node == "search_web":
-            prev = len(state_before.get("sources") or [])
-            now = len(state_after.get("sources") or [])
-            console.print(Panel(f"sources: {now} (+{max(now - prev, 0)})", title="search_web", border_style="cyan"))
-            return
-        if node == "extract":
-            prev = len(state_before.get("notes") or [])
-            now = len(state_after.get("notes") or [])
-            console.print(Panel(f"evidence notes: {now} (+{max(now - prev, 0)})", title="extract", border_style="cyan"))
-            return
-        if node == "decide":
-            need_more = bool(state_after.get("need_more"))
-            followups = state_after.get("followup_queries") or []
-            console.print(
-                Panel(
-                    f"need_more: {need_more}\nfollowup_queries: {len(followups)}",
-                    title="decide",
-                    border_style="cyan",
-                )
-            )
-            return
-        if node == "write_report":
-            r = (state_after.get("final_report") or "").strip()
-            console.print(Panel(f"final_report chars: {len(r)}", title="write_report", border_style="cyan"))
-            return
-        console.print(Panel(json.dumps(update, ensure_ascii=False, indent=2), title=node, border_style="cyan"))
+
+        if warnings:
+            lines.extend(f"warning: {warning['code']}" for warning in warnings)
+        console.print(Panel("\n".join(lines), title=node, border_style="cyan"))
 
     try:
         if args.json or args.no_trace:
