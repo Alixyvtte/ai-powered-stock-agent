@@ -18,9 +18,11 @@ src/stock_agent/tools/market_data.py
 src/stock_agent/tools/web_search.py
 src/stock_agent/web/__init__.py
 src/stock_agent/web/app.py
+src/stock_agent/web/presentation.py
 src/stock_agent/web/static/app.css
 src/stock_agent/web/static/app.js
 src/stock_agent/web/templates/index.html
 tests/test_deep_search_graph.py
 tests/test_new_features.py
 tests/test_web_app.py
+tests/test_web_presentation.py

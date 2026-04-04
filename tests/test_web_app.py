@@ -41,14 +41,18 @@ def test_index_renders_workbench_shell() -> None:
         "detail-summary",
         "detail-warnings",
         "report-panel",
+        "report-caution",
+        "report-error",
         "report-body",
         "summary-panel",
         "summary-cards",
         "summary-market",
+        "summary-market-list",
         "summary-sources",
         "summary-notes",
         "summary-confidence",
         "summary-followups",
+        "summary-followups-list",
     ]:
         assert f'id="{region_id}"' in html
 

@@ -10,11 +10,12 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from stock_agent.agent import DeepSearchAgent
 from stock_agent.event_adapter import build_run_failed_event
 
+from .presentation import build_run_presentation, render_final_report_html
 from .runs import InMemoryRunStore, RunStatus, ActiveRunConflictError
 
 
@@ -33,6 +34,17 @@ class CreateRunResponse(BaseModel):
     status: RunStatus
 
 
+class MarketHighlightResponse(BaseModel):
+    ticker: str
+    source: str | None = None
+    currency: str | None = None
+    price: float | int | None = None
+    market_cap: float | int | None = None
+    trailing_pe: float | int | None = None
+    forward_pe: float | int | None = None
+    dividend_yield: float | int | None = None
+
+
 class RunSnapshotResponse(BaseModel):
     run_id: str
     query: str
@@ -45,6 +57,10 @@ class RunSnapshotResponse(BaseModel):
     snapshot: dict[str, Any]
     summaries: dict[str, dict[str, Any]]
     final_report: str | None = None
+    final_report_html: str | None = None
+    evidence_confidence: str | None = None
+    followup_history: list[str] = Field(default_factory=list)
+    market_highlights: list[MarketHighlightResponse] = Field(default_factory=list)
     error: str | None = None
 
 
@@ -75,6 +91,11 @@ def create_app(
         try:
             agent = build_agent()
             for event in agent.stream_events(run.query):
+                if str(event.get("type") or "") == "run_completed":
+                    event = {
+                        **event,
+                        "final_report_html": render_final_report_html(str(event.get("final_report") or "")),
+                    }
                 store.append_event(run_id, event)
         except Exception as exc:
             latest_run = store.get_run(run_id)
@@ -114,6 +135,14 @@ def create_app(
         if run is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
 
+        presentation = build_run_presentation(
+            status=run.status,
+            final_report=run.final_report,
+            snapshot=run.snapshot,
+            summaries=run.summaries,
+            events=run.events,
+        )
+
         return RunSnapshotResponse(
             run_id=run.run_id,
             query=run.query,
@@ -126,6 +155,22 @@ def create_app(
             snapshot=run.snapshot,
             summaries=run.summaries,
             final_report=run.final_report,
+            final_report_html=presentation.final_report_html,
+            evidence_confidence=presentation.evidence_confidence,
+            followup_history=presentation.followup_history,
+            market_highlights=[
+                MarketHighlightResponse(
+                    ticker=highlight.ticker,
+                    source=highlight.source,
+                    currency=highlight.currency,
+                    price=highlight.price,
+                    market_cap=highlight.market_cap,
+                    trailing_pe=highlight.trailing_pe,
+                    forward_pe=highlight.forward_pe,
+                    dividend_yield=highlight.dividend_yield,
+                )
+                for highlight in presentation.market_highlights
+            ],
             error=run.error,
         )
 
