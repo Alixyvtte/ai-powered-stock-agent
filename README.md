@@ -1,250 +1,305 @@
-# stock-agent
+# Stock Agent
 
-基于 LangGraph 的股票投资研究 Deep Search Agent（初版）。
+`stock-agent` is a LangGraph-based research assistant for stock analysis. It turns a free-form research question into a structured workflow that plans the task, gathers market and web context, extracts evidence, decides whether more research is needed, and produces a cited English memo.
 
-仅用于信息检索与研究辅助，不构成任何投资建议。
+This project is for research support only. It is not investment advice.
 
-## 架构概览
+## What It Includes
 
-这个项目把“deep search”拆成一个可迭代的 LangGraph 工作流：先生成研究计划，再检索与提炼证据，必要时补充检索，最后生成带引用的英文研究报告。
+- A CLI for running end-to-end research jobs locally
+- A FastAPI-based Analyst Workbench web app with live step updates
+- A LangGraph workflow with the pipeline:
+  - `plan -> market -> search_web -> extract -> decide -> write_report`
+- Concurrent web search across multiple providers with DuckDuckGo fallback
+- Market snapshot enrichment via `yfinance`
+- Shared step summaries for both CLI output and the web UI
 
-- Agent 封装与入口
-  - \[agent.py]：`DeepSearchAgent` 封装图的构建与运行，返回 `final_report` 和完整 `state`
-  - \[cli.py]：命令行入口 `stock-agent`
-- LangGraph 工作流（核心）
-  - \[deep\_search\_graph.py]：`plan -> market(optional) -> search_web -> extract -> decide(loop) -> write_report`
-    - plan：把用户问题结构化成 `ResearchPlan`（topic / tickers / subqueries / assumptions）
-    - search\_web：按 subqueries（或 followup\_queries）检索网页，生成 sources（带 id）
-    - extract：从 sources 中提取可核查证据点 `EvidenceNote`（绑定 source\_id）
-    - decide：判断证据是否足够；不足则生成 followup\_queries 进入下一轮检索
-    - write\_report：生成英文报告，并在关键陈述后使用 `[S#]` 引用来源编号
-- 工具层
-  - \[web\_search.py]：Tavily 优先；否则 DuckDuckGo 兜底；并做去重与截断
-  - \[market\_data.py]：yfinance 市场快照（当前仅使用 plan 中第一个 ticker）
-- 配置与模型
-  - \[config.py]：迭代次数、每次搜索结果数、超时等
-  - \[llm.py]：DeepSeek
+## MVP Workbench Scope
 
-## 快速开始
+The current web app follows the MVP Analyst Workbench plan:
 
-1. 安装依赖
+- Single-process FastAPI app
+- Server-rendered HTML with Jinja templates
+- Vanilla JS frontend
+- SSE streaming for step-level progress
+- In-memory run store only
+- One active run at a time
 
-```bash
-python3 -m venv .venv
-./.venv/bin/pip install --upgrade pip
-./.venv/bin/pip install -e ".[dev]"
-```
+What is intentionally not included yet:
 
-1. 配置环境变量
+- Authentication
+- Database persistence
+- Background workers
+- Multi-user concurrency
+- Run history
+- Cancel or retry controls
 
-- DeepSeek
+## Architecture
 
-```bash
-export DEEPSEEK_API_KEY="..."
-export DEEPSEEK_MODEL="deepseek-chat"
-export DEEPSEEK_BASE_URL="https://api.deepseek.com/v1"
-```
+Core workflow:
 
-- Tavily（用于更稳定的网页检索；没有也可用 DuckDuckGo 兜底）
+1. `plan`: build a structured research plan from the user query
+2. `market`: fetch market snapshots for detected tickers
+3. `search_web`: collect web sources from configured search providers
+4. `extract`: turn source content into evidence notes
+5. `decide`: judge whether evidence is sufficient or more search is needed
+6. `write_report`: generate the final English memo with `[S#]` citations
 
-```bash
-export TAVILY_API_KEY="..." # Optional
-  export SERPER_API_KEY="..." # Optional
-  export SERPAPI_KEY="..."    # Optional
-  ```
+The web workbench adds a thin API layer on top of the agent:
 
-1. 运行
+- `GET /`: Analyst Workbench UI
+- `POST /api/runs`: create a run
+- `GET /api/runs/{run_id}`: fetch the latest run snapshot
+- `GET /api/runs/{run_id}/events`: stream SSE events
+- `GET /api/health`: health check
 
-```bash
-./.venv/bin/stock-agent "Deep dive on NVDA: key catalysts and risks over the next 6-12 months"
-```
-
-## 运行预期输出（Trace）
-
-默认运行会输出每个步骤的 trace。如果你不想看到过程日志，可加 `--no-trace`。
-
-下面是一段典型输出（内容会随网络与模型而变化；重点看步骤与计数）：
+## Project Layout
 
 ```text
-╭─────────────────────────────────────────────────────── plan ────────────────────────────────────────────────────────╮
-│ topic: Deep dive on NVDA: key catalysts and risks over the next 6-12 months                                         │
-│ subqueries: 4                                                                                                       │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-2026-03-21 14:14:15,156 INFO stock_agent.trace market:start
-2026-03-21 14:14:20,468 INFO stock_agent.trace market:done seconds=5.31 ticker=NVDA
-╭────────────────────────────────────────────────────── market ───────────────────────────────────────────────────────╮
-│ {                                                                                                                   │
-│   "ticker": "NVDA",                                                                                                 │
-│   "currency": "USD",                                                                                                │
-│   "price": 172.7,                                                                                                   │
-│   "market_cap": 4197473583104.0,                                                                                    │
-│   "trailing_pe": 35.244896,                                                                                         │
-│   "forward_pe": 15.543575,                                                                                          │
-│   "dividend_yield": 0.02                                                                                            │
-│ }                                                                                                                   │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-2026-03-21 14:14:20,472 INFO stock_agent.trace search_web:start iteration=0 queries=4
-2026-03-21 14:14:30,738 INFO stock_agent.trace search_web:done seconds=10.27 new_sources=6 total_sources=6
-╭──────────────────────────────────────────────────── search_web ─────────────────────────────────────────────────────╮
-│ sources: 6 (+6)                                                                                                     │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-2026-03-21 14:14:30,741 INFO stock_agent.trace extract:start
-2026-03-21 14:14:31,113 INFO httpx HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
-2026-03-21 14:14:40,621 INFO stock_agent.trace extract:done seconds=9.88 new_notes=0 total_notes=0
-╭────────────────────────────────────────────────────── extract ──────────────────────────────────────────────────────╮
-│ evidence notes: 0 (+0)                                                                                              │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-2026-03-21 14:14:40,623 INFO stock_agent.trace decide:start iteration=0 sources=6 notes=0
-2026-03-21 14:14:40,795 INFO httpx HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
-2026-03-21 14:14:46,066 INFO stock_agent.trace decide:done seconds=5.44 need_more=True followups=3
-╭────────────────────────────────────────────────────── decide ───────────────────────────────────────────────────────╮
-│ need_more: True                                                                                                     │
-│ followup_queries: 3                                                                                                 │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-2026-03-21 14:14:46,070 INFO stock_agent.trace search_web:start iteration=1 queries=3
-2026-03-21 14:14:57,072 INFO stock_agent.trace search_web:done seconds=11.00 new_sources=6 total_sources=12
-╭──────────────────────────────────────────────────── search_web ─────────────────────────────────────────────────────╮
-│ sources: 12 (+6)                                                                                                    │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-2026-03-21 14:14:57,075 INFO stock_agent.trace extract:start
-2026-03-21 14:14:57,600 INFO httpx HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
-2026-03-21 14:15:06,977 INFO stock_agent.trace extract:done seconds=9.90 new_notes=0 total_notes=0
-╭────────────────────────────────────────────────────── extract ──────────────────────────────────────────────────────╮
-│ evidence notes: 0 (+0)                                                                                              │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-2026-03-21 14:15:06,977 INFO stock_agent.trace decide:start iteration=1 sources=12 notes=0
-2026-03-21 14:15:07,168 INFO httpx HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
-2026-03-21 14:15:12,932 INFO stock_agent.trace decide:done seconds=5.95 need_more=True followups=3
-╭────────────────────────────────────────────────────── decide ───────────────────────────────────────────────────────╮
-│ need_more: True                                                                                                     │
-│ followup_queries: 3                                                                                                 │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-2026-03-21 14:15:12,936 INFO stock_agent.trace write_report:start
-2026-03-21 14:15:13,470 INFO httpx HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
-2026-03-21 14:15:54,187 INFO stock_agent.trace write_report:done seconds=41.25 chars=5905
-╭─────────────────────────────────────────────────── write_report ────────────────────────────────────────────────────╮
-│ final_report chars: 5905                                                                                            │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────────────────────────── Deep Search Report ─────────────────────────────────────────────────╮
-│ **Research Memo: NVIDIA Corporation (NVDA)**                                                                        │
-│ **Date:** [Current Date]                                                                                            │
-│ **Ticker:** NVDA | **Price:** $172.70 | **Market Cap:** ~$4.20T                                                     │
-│ **Currency:** USD | **Trailing P/E:** 35.2 | **Forward P/E:** 15.5 | **Div. Yield:** 0.02% [S6]                     │
-│                                                                                                                     │
-│ **Executive Summary**                                                                                               │
-│ NVIDIA's dominance in AI compute hardware is underpinned by its record financial performance and the secular trend  │
-│ of enterprise and sovereign investment in generative AI infrastructure [S7, S9]. The company's strategic pivot to a │
-│ "compute equals revenue" model emphasizes selling full-stack solutions, potentially increasing customer lock-in and │
-│ recurring revenue streams [S9, S10]. Key near-term drivers include the ramp of the Blackwell platform and sovereign │
-│ AI initiatives. However, risks are mounting, including increasing competition, customer concentration, and the      │
-│ potential for a cyclical slowdown in capex as the initial wave of AI infrastructure build-out matures [S1, S4, S5]. │
-│                                                                                                                     │
-│ **Bull Case**                                                                                                       │
-│ 1.  **Unmatched AI Platform Leadership:** NVIDIA's full-stack approach (chips, systems, software, networking)       │
-│ creates a significant competitive moat. CEO Jensen Huang's declaration that "compute equals revenues" signals a     │
-│ shift towards selling higher-value, integrated solutions [S9, S10].                                                 │
-│ 2.  **Strong Product Cycle:** The transition to the next-generation Blackwell platform is a major catalyst, driving │
-│ performance gains and a refresh cycle among hyperscale and enterprise customers [S8].                               │
-│ 3.  **Sovereign AI as a Growth Vector:** Revenue from sovereign AI initiatives—where nations build internal AI      │
-│ infrastructure—tripled in fiscal 2026, representing a substantial and growing new market [S11].                     │
-│ 4.  **Expanding Total Addressable Market (TAM):** Beyond cloud giants, AI adoption is accelerating in enterprise    │
-│ software, industrial automation (e.g., Rockwell Automation partnership), and other verticals, broadening the        │
-│ customer base [S2, S3, S5].                                                                                         │
-│                                                                                                                     │
-│ **Bear Case**                                                                                                       │
-│ 1.  **Intensifying Competitive Pressure:** Competition is rising from in-house silicon development by major cloud   │
-│ customers (e.g., Google TPU, AWS Trainium) and from other chip designers (e.g., AMD, Intel) [S1, S4]. This could    │
-│ pressure pricing and market share over time.                                                                        │
-│ 2.  **Customer Concentration & Cyclicality:** NVIDIA's revenue is heavily concentrated among a few large hyperscale │
-│ cloud providers [S1]. A slowdown in their capital expenditure (capex) on AI infrastructure, potentially as the      │
-│ initial build-out phase peaks, poses a significant cyclical risk [S4, S5].                                          │
-│ 3.  **Supply Chain and Execution Risk:** Meeting the enormous demand for advanced AI chips involves complex supply  │
-│ chain management. Any disruption in chip production or packaging (e.g., TSMC reliance) could impact deliveries      │
-│ [S8].                                                                                                               │
-│ 4.  **Valuation and High Expectations:** The stock's massive market capitalization embeds expectations for          │
-│ continued hyper-growth. Any deviation from this trajectory, such as a quarter with merely "strong" instead of       │
-│ "record" growth, could lead to multiple contractions [S5].                                                          │
-│                                                                                                                     │
-│ **Key Catalysts (Next 6-12 Months)**                                                                                │
-│ 1.  **Blackwell Platform Ramp:** Commercial deployment and customer adoption metrics for the Blackwell architecture │
-│ will be a primary focus for investors [S8].                                                                         │
-│ 2.  **Quarterly Earnings & Guidance:** Given the high-growth narrative, each earnings report will be scrutinized    │
-│ for data center revenue growth, gross margins, and commentary on demand sustainability [S7, S9].                    │
-│ 3.  **Sovereign AI Contract Announcements:** New deals or expansions with government entities will provide tangible │
-│ evidence of this growth vector [S11].                                                                               │
-│ 4.  **Industry Events & Developer Conference (GTC):** New product announcements, software ecosystem developments,   │
-│ and partner showcases can reinforce the platform moat narrative.                                                    │
-│                                                                                                                     │
-│ **Key Risks**                                                                                                       │
-│ 1.  **Hyperscale Capex Volatility:** A pronounced slowdown in spending by major cloud service providers is the      │
-│ single largest macroeconomic and cyclical risk [S1, S4, S5].                                                        │
-│ 2.  **Competitive Displacement:** Successful adoption of competitive AI accelerators (internal or external) by key  │
-│ customers, even for specific workloads, could begin to erode NVIDIA's dominance [S1, S4].                           │
-│ 3.  **Geopolitical/Trade Policy:** Escalating trade restrictions between the U.S. and China could further constrain │
-│ a significant market, leading to long-term market share loss [S8].                                                  │
-│ 4.  **Technological Misstep:** Failure to execute on the Blackwell transition or a significant delay would          │
-│ undermine the growth story.                                                                                         │
-│                                                                                                                     │
-│ **Open Questions**                                                                                                  │
-│ 1.  What is the durability of demand beyond the initial generative AI infrastructure build-out? Is there evidence   │
-│ of a "second wave" driven by enterprise AI applications with clear ROI? [S3, S5]                                    │
-│ 2.  How quickly will the competitive landscape evolve, and what is NVIDIA's sustainable market share in AI          │
-│ accelerators over the medium term? [S1, S4]                                                                         │
-│ 3.  Can the sovereign AI business grow sufficiently to offset potential moderation in hyperscale cloud demand?      │
-│ [S11]                                                                                                               │
-│ 4.  How will the "compute equals revenue" model impact gross margins, customer economics, and competitive           │
-│ positioning over time? [S9, S10]                                                                                    │
-│                                                                                                                     │
-│ **Sources**                                                                                                         │
-│ [S1] Artisan Partners - Perspectives on AI and Related Infrastructure                                               │
-│ [S2] LinkedIn - Rockwell Automation Sets the Stage for the Next Growth Cycle                                        │
-│ [S3] Primary VC - Insights                                                                                          │
-│ [S4] William Blair - Navigating the Boom: Confronting Generative AI's Most Pressing Questions                       │
-│ [S5] Americas Technology - Software - Gen-AI Part VIII: Catalyst or Culprit                                         │
-│ [S6] Yahoo Finance - NVDA Key Statistics                                                                            │
-│ [S7][S9] Fortune/Yahoo - Nvidia's record quarter and what it signals for CFOs                                       │
-│ [S8] Deep Research Global - Nvidia Company Analysis and Outlook Report (2026)                                       │
-│ [S10] Pymnts.com - Nvidia's Jensen Declares 'Compute Equals Revenues'                                               │
-│ [S11] Intellectia.ai - Nvidia's Sovereign AI Revenue Triples in Fiscal 2026                                         │
-│ [S12] Yahoo Finance - NVDA Earnings Call Transcript (Q1 2025)                                                       │
-│                                                                                                                     │
-│ **Disclosure**                                                                                                      │
-│ For research purposes only. Not investment advice.                                                                  │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+src/stock_agent/
+  agent.py                 Agent entrypoint
+  cli.py                   CLI command
+  config.py                Runtime config from environment
+  event_adapter.py         Shared step summaries and UI events
+  llm.py                   OpenAI / DeepSeek model wiring
+  graphs/deep_search_graph.py
+                           LangGraph workflow
+  tools/web_search.py      Web search providers and fallback logic
+  tools/market_data.py     Market snapshot fetcher
+  web/app.py               FastAPI app
+  web/templates/index.html Analyst Workbench page
+  web/static/              Frontend assets
+tests/                     API, SSE, UI, and graph tests
+docs/                      Project notes and brief
 ```
 
-`search_web` 会最多循环多少次：
+## Requirements
 
-- 最大次数由 `STOCK_AGENT_MAX_ITERATIONS` 控制（默认 2）
-- 实际是否继续取决于 `decide` 步骤里的 `need_more`
+- Python 3.9+
+- Recommended: Python 3.11 or 3.12 for the smoothest dependency compatibility
+- An LLM API key:
+  - `OPENAI_API_KEY`, or
+  - `DEEPSEEK_API_KEY`
+- Optional search API keys for better retrieval quality:
+  - `TAVILY_API_KEY`
+  - `SERPER_API_KEY`
+  - `SERPAPI_KEY`
 
-## 输出结构
+If no search API key is provided, the project falls back to DuckDuckGo.
+
+## Setup
+
+Examples below use PowerShell. On macOS or Linux, replace the activation step with `source .venv/bin/activate`.
+
+1. Create a virtual environment.
+
+```powershell
+python -m venv .venv
+```
+
+2. Activate it.
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+3. Upgrade `pip`.
+
+```powershell
+python -m pip install --upgrade pip
+```
+
+4. Install the project in editable mode.
+
+```powershell
+python -m pip install -e ".[dev]"
+```
+
+## Environment Variables
+
+Create a `.env` file in the project root or export these variables in your shell.
+
+Minimal OpenAI setup:
+
+```env
+OPENAI_API_KEY=your_key_here
+OPENAI_MODEL=gpt-4o-mini
+```
+
+Alternative DeepSeek setup:
+
+```env
+DEEPSEEK_API_KEY=your_key_here
+DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+```
+
+Optional search providers:
+
+```env
+TAVILY_API_KEY=your_key_here
+SERPER_API_KEY=your_key_here
+SERPAPI_KEY=your_key_here
+```
+
+Optional agent tuning:
+
+```env
+STOCK_AGENT_MAX_ITERATIONS=2
+STOCK_AGENT_MAX_RESULTS=5
+STOCK_AGENT_TIMEOUT_S=25
+```
+
+Notes:
+
+- If `DEEPSEEK_API_KEY` is set, the code prefers DeepSeek over OpenAI.
+- `.env` is loaded automatically by the agent at runtime.
+
+## Run The CLI
+
+1. Activate the virtual environment.
+2. Make sure your `.env` file is present.
+3. Run the CLI with a research question.
+
+```powershell
+stock-agent "Deep dive on NVDA: key catalysts and risks over the next 6-12 months"
+```
+
+Useful variants:
+
+```powershell
+stock-agent --no-trace "Analyze Microsoft cloud growth durability"
+stock-agent --json "Compare AMD and NVDA AI positioning"
+```
+
+CLI modes:
+
+- Default: prints step-by-step summaries and then the final memo
+- `--no-trace`: prints only the final memo
+- `--json`: prints the final graph state as JSON
+
+## Run The Backend And Web UI
+
+The backend API and the Analyst Workbench UI are served by the same FastAPI process.
+
+1. Activate the virtual environment.
+2. Confirm your `.env` file is configured.
+3. Start the FastAPI app with Uvicorn.
+
+```powershell
+uvicorn stock_agent.web.app:app --reload
+```
+
+4. Open the workbench in your browser:
+
+```text
+http://127.0.0.1:8000/
+```
+
+5. Enter a research query and submit the form.
+6. Watch the step timeline update live as the run progresses.
+7. Read the rendered final memo once the run completes.
+
+Useful URLs:
+
+- UI: `http://127.0.0.1:8000/`
+- Health check: `http://127.0.0.1:8000/api/health`
+
+Important behavior:
+
+- Only one active run is allowed at a time
+- Run state is stored in memory only
+- Restarting the server clears in-memory runs
+
+## Run The API Directly
+
+You can also use the backend without the browser UI.
+
+1. Start the server:
+
+```powershell
+uvicorn stock_agent.web.app:app --reload
+```
+
+2. Create a run:
+
+```http
+POST /api/runs
+Content-Type: application/json
+
+{ "query": "Analyze Tesla margin durability" }
+```
+
+3. Stream step events from:
+
+```text
+GET /api/runs/{run_id}/events
+```
+
+4. Fetch the latest snapshot from:
+
+```text
+GET /api/runs/{run_id}
+```
+
+Event types emitted by the workbench API:
+
+- `run_started`
+- `step_completed`
+- `run_completed`
+- `run_failed`
+
+## Output Shape
+
+The final memo is written in English and is designed to include:
 
 - Executive Summary
-- Bull Case / Bear Case
+- Bull Case
+- Bear Case
 - Key Catalysts
 - Key Risks
-- Open Questions (to validate next)
-- Sources (with \[S#] references)
+- Open Questions
+- Sources
 
-## Features / Roadmap
+Important claims should include inline `[S#]` citations.
 
-- [x] Web Search Tool (DuckDuckGo fallback)
-- [x] Multi-provider Concurrent Search (SerpApi, Tavily, Serper)
-- [x] High-Speed Parallel Search with Timeout Truncation
-- [x] LangGraph Node: Plan
-- [x] LangGraph Node: Web Search
-- [x] LangGraph Node: Extract
-- [x] LangGraph Node: Decide (Followup Loop)
-- [x] LangGraph Node: Report
-- [ ] Portfolio / User Profile Context
+## Testing
 
-## Enhanced Search Capabilities
+Run the test suite with:
 
-The agent features a robust, concurrent web search module designed for fast and efficient research:
-- **Multi-Source Aggregation**: Simultaneously queries fast-response providers like SerpApi, Tavily, and Google Serper.
-- **High-Speed Mode**: Utilizes an aggressive timeout truncation strategy (fast-timeout). The agent does not wait indefinitely for slow API responses; instead, it immediately proceeds with the successful results fetched within the timeframe, ensuring rapid iterative cycles.
-- **Intelligent Deduplication**: Interleaves results to preserve the original relevance ranking from each provider while filtering out duplicate URLs.
-- **Graceful Fallback**: If no API keys are available, it seamlessly falls back to DuckDuckGo search without crashing.
+```powershell
+pytest
+```
+
+Current tests cover:
+
+- API run creation and validation
+- SSE event streaming
+- Snapshot behavior
+- Workbench page rendering
+- Event summarization
+- Deep search graph behavior
+
+## Known Limitations
+
+- The app is an MVP and supports only one active run
+- Run storage is in memory only
+- Market enrichment is currently shallow compared with a full research terminal
+- Source quality still depends heavily on search provider results
+- The system is designed to degrade gracefully, so low-quality intermediate evidence can still produce a final memo
+
+## Python API
+
+If you want to use the agent directly in code:
+
+```python
+from stock_agent.agent import DeepSearchAgent
+
+agent = DeepSearchAgent()
+result = agent.run("Analyze Amazon AWS margin durability")
+print(result.final_report)
+```
 
 ## License
+
+No license file is currently included in this repository.
