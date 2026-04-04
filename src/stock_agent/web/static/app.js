@@ -29,6 +29,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const detailEmpty = document.getElementById("detail-empty");
   const detailSummary = document.getElementById("detail-summary");
   const detailWarnings = document.getElementById("detail-warnings");
+  const reportCaution = document.getElementById("report-caution");
+  const reportError = document.getElementById("report-error");
   const reportBody = document.getElementById("report-body");
   const timelineSteps = Array.from(document.querySelectorAll("[data-step]"));
 
@@ -36,6 +38,7 @@ document.addEventListener("DOMContentLoaded", () => {
     market: {
       value: document.getElementById("summary-market-value"),
       meta: document.getElementById("summary-market-meta"),
+      list: document.getElementById("summary-market-list"),
     },
     sources: {
       value: document.getElementById("summary-sources-value"),
@@ -52,6 +55,7 @@ document.addEventListener("DOMContentLoaded", () => {
     followups: {
       value: document.getElementById("summary-followups-value"),
       meta: document.getElementById("summary-followups-meta"),
+      list: document.getElementById("summary-followups-list"),
     },
   };
 
@@ -61,8 +65,13 @@ document.addEventListener("DOMContentLoaded", () => {
     latestNode: null,
     snapshot: {},
     summaries: {},
+    stepWarnings: {},
     finalReport: null,
+    finalReportHtml: null,
     error: null,
+    evidenceConfidence: null,
+    followupHistory: [],
+    marketHighlights: [],
   };
 
   let eventSource = null;
@@ -153,6 +162,26 @@ document.addEventListener("DOMContentLoaded", () => {
     return String(value);
   }
 
+  function formatMetricValue(value) {
+    if (typeof value !== "number") {
+      return null;
+    }
+
+    if (Math.abs(value) >= 1_000_000_000_000) {
+      return `${(value / 1_000_000_000_000).toFixed(2)}T`;
+    }
+    if (Math.abs(value) >= 1_000_000_000) {
+      return `${(value / 1_000_000_000).toFixed(2)}B`;
+    }
+    if (Math.abs(value) >= 1_000_000) {
+      return `${(value / 1_000_000).toFixed(2)}M`;
+    }
+    if (Math.abs(value) >= 1_000) {
+      return `${(value / 1_000).toFixed(1)}K`;
+    }
+    return `${value}`;
+  }
+
   function deriveWarnings(node, summary) {
     if (!node || !summary) {
       return [];
@@ -164,18 +193,102 @@ document.addEventListener("DOMContentLoaded", () => {
       Number(summary.ticker_count || 0) > 0 &&
       Number(summary.covered_ticker_count || 0) === 0
     ) {
-      warnings.push("No usable market snapshot was returned for the planned tickers.");
+      warnings.push({
+        code: "empty_market_data",
+        message: "No usable market snapshot was returned for the planned tickers.",
+      });
     }
     if (node === "extract" && Number(summary.new_notes || 0) === 0) {
-      warnings.push("No new evidence notes were extracted from the latest source batch.");
+      warnings.push({
+        code: "no_new_notes",
+        message: "No new evidence notes were extracted from the latest source batch.",
+      });
     }
     if (
       node === "decide" &&
       ["low", "insufficient"].includes(String(summary.evidence_confidence || ""))
     ) {
-      warnings.push("Evidence confidence is low, so the resulting memo should be treated cautiously.");
+      warnings.push({
+        code: "low_evidence_confidence",
+        message: "Evidence confidence is low, so the resulting memo should be treated cautiously.",
+      });
     }
     return warnings;
+  }
+
+  function buildWarningMapFromSummaries(summaries) {
+    return Object.fromEntries(
+      Object.entries(summaries).map(([node, summary]) => [node, deriveWarnings(node, summary)]),
+    );
+  }
+
+  function normalizeMarketHighlightsFromSnapshot(snapshot) {
+    const market = snapshot.market;
+    if (!market || typeof market !== "object") {
+      return [];
+    }
+
+    return Object.entries(market).flatMap(([ticker, providerMap]) => {
+      if (!providerMap || typeof providerMap !== "object") {
+        return [];
+      }
+
+      for (const [source, payload] of Object.entries(providerMap)) {
+        if (!payload || typeof payload !== "object" || payload.error) {
+          continue;
+        }
+        const hasUsefulData =
+          payload.price !== undefined ||
+          payload.market_cap !== undefined ||
+          payload.market_cap_cny !== undefined ||
+          payload.trailing_pe !== undefined ||
+          payload.forward_pe !== undefined ||
+          payload.dividend_yield !== undefined ||
+          payload.currency !== undefined;
+        if (!hasUsefulData) {
+          continue;
+        }
+        return [
+          {
+            ticker,
+            source,
+            currency: payload.currency || null,
+            price: typeof payload.price === "number" ? payload.price : null,
+            market_cap:
+              typeof payload.market_cap === "number"
+                ? payload.market_cap
+                : typeof payload.market_cap_cny === "number"
+                  ? payload.market_cap_cny
+                  : null,
+            trailing_pe: typeof payload.trailing_pe === "number" ? payload.trailing_pe : null,
+            forward_pe: typeof payload.forward_pe === "number" ? payload.forward_pe : null,
+            dividend_yield:
+              typeof payload.dividend_yield === "number" ? payload.dividend_yield : null,
+          },
+        ];
+      }
+
+      return [];
+    });
+  }
+
+  function mergeFollowupHistory(existing, followups) {
+    const merged = Array.isArray(existing) ? [...existing] : [];
+    const seen = new Set(merged);
+    for (const followup of Array.isArray(followups) ? followups : []) {
+      const normalized = String(followup || "").trim();
+      if (!normalized || seen.has(normalized)) {
+        continue;
+      }
+      seen.add(normalized);
+      merged.push(normalized);
+    }
+    return merged;
+  }
+
+  function extractEvidenceConfidence(snapshot, summaries) {
+    const decide = summaries.decide || null;
+    return decide?.evidence_confidence || snapshot.evidence_confidence || null;
   }
 
   function renderStatus() {
@@ -259,7 +372,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function renderDetail() {
     const summary = state.latestNode ? state.summaries[state.latestNode] : null;
-    const warnings = deriveWarnings(state.latestNode, summary);
+    const warnings = state.latestNode ? state.stepWarnings[state.latestNode] || [] : [];
     const formattedTimestamp = formatTimestamp(latestTimestamp);
 
     detailSummary.replaceChildren();
@@ -311,9 +424,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     if (warnings.length > 0) {
-      const items = warnings.map((message) => {
+      const items = warnings.map((warning) => {
         const item = document.createElement("li");
-        item.textContent = message;
+        item.textContent = warning.message || String(warning);
         return item;
       });
       detailWarnings.replaceChildren(...items);
@@ -323,6 +436,31 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateSummaryCard(card, value, meta) {
     card.value.textContent = value;
     card.meta.textContent = meta;
+  }
+
+  function renderSummaryList(element, items) {
+    if (!element) {
+      return;
+    }
+    if (!items.length) {
+      element.replaceChildren();
+      return;
+    }
+    const children = items.map((item) => {
+      const li = document.createElement("li");
+      if (typeof item === "string") {
+        li.textContent = item;
+      } else {
+        const title = document.createElement("strong");
+        title.textContent = item.title;
+        li.append(title);
+        if (item.detail) {
+          li.append(` ${item.detail}`);
+        }
+      }
+      return li;
+    });
+    element.replaceChildren(...children);
   }
 
   function renderSummaryCards() {
@@ -337,6 +475,12 @@ document.addEventListener("DOMContentLoaded", () => {
         `${market.covered_ticker_count || 0} / ${market.ticker_count || 0} tickers covered`,
         `${market.tickers_with_price || 0} with price, ${market.tickers_with_market_cap || 0} with market cap`,
       );
+    } else if (state.marketHighlights.length > 0) {
+      updateSummaryCard(
+        summaryCards.market,
+        `${state.marketHighlights.length} ticker highlight${state.marketHighlights.length === 1 ? "" : "s"}`,
+        "A compact market snapshot is available from the latest successful provider response.",
+      );
     } else {
       updateSummaryCard(
         summaryCards.market,
@@ -344,6 +488,36 @@ document.addEventListener("DOMContentLoaded", () => {
         "Coverage and key metrics will appear here.",
       );
     }
+
+    renderSummaryList(
+      summaryCards.market.list,
+      state.marketHighlights.map((highlight) => {
+        const parts = [];
+        if (highlight.price !== null) {
+          const currency = highlight.currency ? `${highlight.currency} ` : "";
+          parts.push(`price ${currency}${highlight.price}`);
+        }
+        const marketCap = formatMetricValue(highlight.market_cap);
+        if (marketCap) {
+          parts.push(`market cap ${marketCap}`);
+        }
+        if (typeof highlight.forward_pe === "number") {
+          parts.push(`forward P/E ${highlight.forward_pe}`);
+        } else if (typeof highlight.trailing_pe === "number") {
+          parts.push(`trailing P/E ${highlight.trailing_pe}`);
+        }
+        if (typeof highlight.dividend_yield === "number") {
+          parts.push(`yield ${highlight.dividend_yield}`);
+        }
+        if (highlight.source) {
+          parts.push(`source ${highlight.source}`);
+        }
+        return {
+          title: highlight.ticker,
+          detail: parts.join(", "),
+        };
+      }),
+    );
 
     if (sources) {
       updateSummaryCard(
@@ -373,7 +547,24 @@ document.addEventListener("DOMContentLoaded", () => {
       );
     }
 
-    if (decide) {
+    if (state.evidenceConfidence) {
+      const confidence = String(state.evidenceConfidence);
+      let guidance = "Evidence coverage is building.";
+      if (confidence === "high") {
+        guidance = "Coverage appears strong across the current memo inputs.";
+      } else if (confidence === "medium") {
+        guidance = "Useful evidence exists, but some gaps may remain.";
+      } else if (confidence === "low") {
+        guidance = "Coverage is thin. Treat the final memo cautiously.";
+      } else if (confidence === "insufficient") {
+        guidance = "Coverage is insufficient for a trustworthy memo.";
+      }
+      updateSummaryCard(
+        summaryCards.confidence,
+        `${confidence} confidence`,
+        guidance,
+      );
+    } else if (decide) {
       updateSummaryCard(
         summaryCards.confidence,
         `${formatValue(decide.evidence_confidence)} confidence`,
@@ -387,36 +578,52 @@ document.addEventListener("DOMContentLoaded", () => {
       );
     }
 
-    const followupCount = decide
-      ? Number(decide.followup_count || 0)
-      : Array.isArray(state.snapshot.followup_queries)
-        ? state.snapshot.followup_queries.length
-        : 0;
+    const followupCount = state.followupHistory.length;
     updateSummaryCard(
       summaryCards.followups,
       `${followupCount} follow-up quer${followupCount === 1 ? "y" : "ies"}`,
-      decide
-        ? `Need more evidence: ${formatValue(decide.need_more)}.`
-        : "Loop decisions will update this count.",
+      followupCount > 0
+        ? "Preserved follow-up prompts from prior decide steps."
+        : "No follow-up queries were needed.",
     );
+    renderSummaryList(summaryCards.followups.list, state.followupHistory);
+  }
+
+  function renderReportState() {
+    const confidence = String(state.evidenceConfidence || "");
+    const showCaution =
+      state.status === "completed" && (confidence === "low" || confidence === "insufficient");
+
+    reportError.hidden = state.status !== "failed";
+    reportError.textContent = state.status === "failed" ? state.error || "Run failed." : "";
+
+    reportCaution.hidden = !showCaution || state.status === "failed";
+    if (showCaution && state.status !== "failed") {
+      reportCaution.textContent =
+        confidence === "insufficient"
+          ? "Evidence coverage is insufficient. This memo should be treated as incomplete and non-authoritative."
+          : "Evidence coverage is limited. Treat the final memo cautiously and verify key claims before relying on it.";
+    } else {
+      reportCaution.textContent = "";
+    }
   }
 
   function renderReport() {
-    const reportText =
-      state.status === "completed"
-        ? state.finalReport || state.snapshot.final_report || ""
-        : "";
+    renderReportState();
 
-    if (reportText) {
-      reportBody.textContent = reportText;
+    const reportHtml = state.status === "completed" ? state.finalReportHtml || "" : "";
+
+    if (reportHtml) {
+      reportBody.innerHTML = reportHtml;
       reportBody.classList.remove("empty-state");
-    } else {
-      reportBody.textContent =
-        state.status === "failed"
-          ? "No final report is available because the run ended in failure."
-          : "The completed memo will render here automatically after the run finishes.";
-      reportBody.classList.add("empty-state");
+      return;
     }
+
+    reportBody.textContent =
+      state.status === "failed"
+        ? "No final report is available because the run ended in failure."
+        : "The completed memo will render here automatically after the run finishes.";
+    reportBody.classList.add("empty-state");
   }
 
   function render() {
@@ -435,8 +642,13 @@ document.addEventListener("DOMContentLoaded", () => {
     state.latestNode = null;
     state.snapshot = { query };
     state.summaries = {};
+    state.stepWarnings = {};
     state.finalReport = null;
+    state.finalReportHtml = null;
     state.error = null;
+    state.evidenceConfidence = null;
+    state.followupHistory = [];
+    state.marketHighlights = [];
     latestTimestamp = null;
     clearNotice();
     render();
@@ -451,8 +663,18 @@ document.addEventListener("DOMContentLoaded", () => {
       query: snapshotPayload.query,
     };
     state.summaries = { ...(snapshotPayload.summaries || {}) };
+    state.stepWarnings = buildWarningMapFromSummaries(state.summaries);
     state.finalReport = snapshotPayload.final_report || null;
+    state.finalReportHtml = snapshotPayload.final_report_html || null;
     state.error = snapshotPayload.error || null;
+    state.evidenceConfidence =
+      snapshotPayload.evidence_confidence || extractEvidenceConfidence(state.snapshot, state.summaries);
+    state.followupHistory = Array.isArray(snapshotPayload.followup_history)
+      ? [...snapshotPayload.followup_history]
+      : mergeFollowupHistory([], state.snapshot.followup_queries);
+    state.marketHighlights = Array.isArray(snapshotPayload.market_highlights)
+      ? [...snapshotPayload.market_highlights]
+      : normalizeMarketHighlightsFromSnapshot(state.snapshot);
     latestTimestamp = snapshotPayload.updated_at || null;
     render();
   }
@@ -469,8 +691,14 @@ document.addEventListener("DOMContentLoaded", () => {
         ...(event.snapshot || {}),
         query: event.query || state.snapshot.query || "",
       };
+      state.summaries = {};
+      state.stepWarnings = {};
       state.error = null;
       state.finalReport = null;
+      state.finalReportHtml = null;
+      state.evidenceConfidence = extractEvidenceConfidence(state.snapshot, state.summaries);
+      state.followupHistory = [];
+      state.marketHighlights = normalizeMarketHighlightsFromSnapshot(state.snapshot);
       latestTimestamp = event.timestamp || latestTimestamp;
       clearNotice();
       render();
@@ -488,7 +716,16 @@ document.addEventListener("DOMContentLoaded", () => {
         ...state.summaries,
         [event.node]: { ...(event.summary || {}) },
       };
+      state.stepWarnings = {
+        ...state.stepWarnings,
+        [event.node]: Array.isArray(event.warnings)
+          ? event.warnings
+          : deriveWarnings(event.node, event.summary || {}),
+      };
       state.error = null;
+      state.evidenceConfidence = extractEvidenceConfidence(state.snapshot, state.summaries);
+      state.followupHistory = mergeFollowupHistory(state.followupHistory, state.snapshot.followup_queries);
+      state.marketHighlights = normalizeMarketHighlightsFromSnapshot(state.snapshot);
       latestTimestamp = event.timestamp || latestTimestamp;
       clearNotice();
       render();
@@ -503,7 +740,11 @@ document.addEventListener("DOMContentLoaded", () => {
         query: state.snapshot.query || "",
       };
       state.finalReport = event.final_report || state.snapshot.final_report || "";
+      state.finalReportHtml = event.final_report_html || state.finalReportHtml || null;
       state.error = null;
+      state.evidenceConfidence = extractEvidenceConfidence(state.snapshot, state.summaries);
+      state.followupHistory = mergeFollowupHistory(state.followupHistory, state.snapshot.followup_queries);
+      state.marketHighlights = normalizeMarketHighlightsFromSnapshot(state.snapshot);
       latestTimestamp = event.timestamp || latestTimestamp;
       clearNotice();
       render();
@@ -519,6 +760,10 @@ document.addEventListener("DOMContentLoaded", () => {
         query: state.snapshot.query || "",
       };
       state.error = event.error || "Run failed.";
+      state.finalReportHtml = null;
+      state.evidenceConfidence = extractEvidenceConfidence(state.snapshot, state.summaries);
+      state.followupHistory = mergeFollowupHistory(state.followupHistory, state.snapshot.followup_queries);
+      state.marketHighlights = normalizeMarketHighlightsFromSnapshot(state.snapshot);
       latestTimestamp = event.timestamp || latestTimestamp;
       clearNotice();
       render();

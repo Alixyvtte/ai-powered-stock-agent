@@ -63,7 +63,7 @@ def _build_success_events(query: str) -> list[dict[str, Any]]:
     write_report_event = build_step_event(
         "write_report",
         plan_event["snapshot"],
-        {"final_report": "Memo body"},
+        {"final_report": "# Memo\n\nMemo body"},
         timestamp="2026-04-04T00:00:02+00:00",
     )
     assert write_report_event is not None
@@ -115,21 +115,24 @@ def test_sse_stream_executes_run_and_persists_completed_snapshot() -> None:
         "plan",
         "write_report",
     ]
-    assert events[-1]["final_report"] == "Memo body"
+    assert events[-1]["final_report"] == "# Memo\n\nMemo body"
+    assert "<h1>Memo</h1>" in events[-1]["final_report_html"]
+    assert "<p>Memo body</p>" in events[-1]["final_report_html"]
 
     snapshot_response = client.get(f"/api/runs/{run_id}")
     data = snapshot_response.json()
     assert data["status"] == "completed"
     assert data["latest_node"] == "write_report"
-    assert data["final_report"] == "Memo body"
+    assert data["final_report"] == "# Memo\n\nMemo body"
+    assert "<h1>Memo</h1>" in data["final_report_html"]
     assert data["error"] is None
-    assert data["snapshot"]["final_report"] == "Memo body"
+    assert data["snapshot"]["final_report"] == "# Memo\n\nMemo body"
     assert data["summaries"]["plan"] == {
         "topic": "NVDA research",
         "ticker_count": 1,
         "subquery_count": 2,
     }
-    assert data["summaries"]["write_report"] == {"report_length": 9}
+    assert data["summaries"]["write_report"] == {"report_length": 17}
 
 
 def test_sse_stream_emits_run_failed_and_releases_active_slot() -> None:

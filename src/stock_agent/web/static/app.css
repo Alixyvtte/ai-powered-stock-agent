@@ -232,14 +232,61 @@ body {
   color: #8d5a14;
 }
 
+.warning-list li + li,
+.compact-list li + li {
+  margin-top: 6px;
+}
+
 .warning-list:empty,
-.detail-list:empty {
+.detail-list:empty,
+.compact-list:empty {
   display: none;
 }
 
+.report-banner {
+  margin: 0 0 14px;
+  border-radius: 14px;
+  padding: 12px 14px;
+  line-height: 1.6;
+}
+
+.report-banner[hidden] {
+  display: none;
+}
+
+.report-banner-warning {
+  border: 1px solid #d6b06c;
+  background: #fff4df;
+  color: #8d5a14;
+}
+
+.report-banner-error {
+  border: 1px solid #d08c82;
+  background: #fbe8e4;
+  color: #9b3d2f;
+}
+
 .report-body {
-  white-space: pre-wrap;
   line-height: 1.7;
+}
+
+.report-body > :first-child {
+  margin-top: 0;
+}
+
+.report-body > :last-child {
+  margin-bottom: 0;
+}
+
+.report-body a {
+  color: var(--accent);
+}
+
+.report-body pre {
+  overflow-x: auto;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(22, 36, 58, 0.06);
 }
 
 .summary-cards {
@@ -273,6 +320,16 @@ body {
   margin-top: 4px;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.compact-list {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.compact-list strong {
+  color: var(--ink);
 }
 
 .status-panel[data-state="running"] .status-value,

@@ -77,6 +77,8 @@
               <div class="panel-heading">
                 <h2>Final Report</h2>
               </div>
+              <div id="report-caution" class="report-banner report-banner-warning" hidden></div>
+              <div id="report-error" class="report-banner report-banner-error" hidden></div>
               <div id="report-body" class="report-body empty-state">
                 The completed memo will render here automatically after the run finishes.
               </div>
@@ -92,6 +94,7 @@
                 <h3>Market Snapshot</h3>
                 <p id="summary-market-value" class="summary-value">Waiting for market data.</p>
                 <p id="summary-market-meta" class="summary-meta">Coverage and key metrics will appear here.</p>
+                <ul id="summary-market-list" class="compact-list"></ul>
               </section>
               <section id="summary-sources" class="summary-card">
                 <h3>Sources</h3>
@@ -112,6 +115,7 @@
                 <h3>Follow-up Queries</h3>
                 <p id="summary-followups-value" class="summary-value">0 follow-up queries</p>
                 <p id="summary-followups-meta" class="summary-meta">Loop decisions will update this count.</p>
+                <ul id="summary-followups-list" class="compact-list"></ul>
               </section>
             </div>
           </aside>
