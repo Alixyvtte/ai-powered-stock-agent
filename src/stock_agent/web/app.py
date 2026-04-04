@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
@@ -23,6 +25,21 @@ class CreateRunRequest(BaseModel):
 class CreateRunResponse(BaseModel):
     run_id: str
     status: RunStatus
+
+
+class RunSnapshotResponse(BaseModel):
+    run_id: str
+    query: str
+    status: RunStatus
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    latest_node: str | None = None
+    snapshot: dict[str, Any]
+    summaries: dict[str, dict[str, Any]]
+    final_report: str | None = None
+    error: str | None = None
 
 
 def create_app(run_store: InMemoryRunStore | None = None) -> FastAPI:
@@ -52,6 +69,27 @@ def create_app(run_store: InMemoryRunStore | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
         return CreateRunResponse(run_id=run.run_id, status=run.status)
+
+    @app.get("/api/runs/{run_id}", response_model=RunSnapshotResponse)
+    def get_run_snapshot(run_id: str) -> RunSnapshotResponse:
+        run = store.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
+
+        return RunSnapshotResponse(
+            run_id=run.run_id,
+            query=run.query,
+            status=run.status,
+            created_at=run.created_at,
+            updated_at=run.updated_at,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            latest_node=run.latest_node,
+            snapshot=run.snapshot,
+            summaries=run.summaries,
+            final_report=run.final_report,
+            error=run.error,
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
