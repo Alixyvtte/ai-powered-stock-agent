@@ -6,6 +6,13 @@ from typing import Any, Dict, Iterator, Optional, Tuple
 from dotenv import load_dotenv
 
 from .config import AgentConfig
+from .event_adapter import (
+    WorkbenchEvent,
+    build_run_completed_event,
+    build_run_failed_event,
+    build_run_started_event,
+    build_step_event,
+)
 from .graphs.deep_search_graph import build_deep_search_graph
 
 
@@ -48,3 +55,27 @@ class DeepSearchAgent:
                     yield node, {"_raw": update}
             else:
                 yield "event", {"_raw": ev}
+
+    def stream_events(self, query: str) -> Iterator[WorkbenchEvent]:
+        snapshot: Dict[str, Any] = {
+            "query": query,
+            "max_iterations": self._config.max_iterations,
+        }
+        last_node: str | None = None
+
+        yield build_run_started_event(query, snapshot)
+        try:
+            for node, update in self.stream(query):
+                if not isinstance(update, dict):
+                    continue
+                event = build_step_event(node, snapshot, update)
+                if event is None:
+                    continue
+                snapshot = dict(event["snapshot"])
+                last_node = node
+                yield event
+        except Exception as exc:
+            yield build_run_failed_event(str(exc), snapshot, node=last_node)
+            return
+
+        yield build_run_completed_event(snapshot)
