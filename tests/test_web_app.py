@@ -24,6 +24,23 @@ def test_index_renders_workbench_shell() -> None:
     assert response.headers["content-type"].startswith("text/html")
     html = response.text
     assert "Stock Agent Analyst Workbench" in html
+    assert '/static/app.css' in html
+    assert '/static/app.js' in html
+
+    for class_name in [
+        "shell",
+        "page-header",
+        "page-header-copy",
+        "top-row",
+        "content-grid",
+        "timeline-step",
+        "timeline-step-copy",
+        "step-index",
+        "summary-card",
+        "report-banner",
+    ]:
+        assert class_name in html
+
     for region_id in [
         "app-header",
         "query-form",
