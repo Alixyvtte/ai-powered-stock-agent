@@ -10,7 +10,7 @@
   <body>
     <div class="shell">
       <header id="app-header" class="panel page-header">
-        <div>
+        <div class="page-header-copy">
           <p class="eyebrow">MVP Analyst Workbench</p>
           <h1>{{ page_title }}</h1>
           <p class="subtitle">
@@ -51,8 +51,11 @@
             <ol id="timeline-list" class="timeline-list">
               {% for step in steps %}
               <li class="timeline-step" data-step="{{ step }}" data-state="idle">
-                <span class="step-name">{{ step }}</span>
-                <span class="step-state">Idle</span>
+                <span class="step-index" aria-hidden="true">{{ "%02d"|format(loop.index) }}</span>
+                <div class="timeline-step-copy">
+                  <span class="step-name">{{ step }}</span>
+                  <span class="step-state">Idle</span>
+                </div>
               </li>
               {% endfor %}
             </ol>
