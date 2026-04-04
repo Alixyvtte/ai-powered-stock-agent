@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ page_title }}</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}" />
+    <script defer src="{{ request.url_for('static', path='app.js') }}"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header id="app-header" class="panel page-header">
+        <div>
+          <p class="eyebrow">MVP Analyst Workbench</p>
+          <h1>{{ page_title }}</h1>
+          <p class="subtitle">
+            A lightweight research workbench for tracing the stock agent pipeline.
+          </p>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="top-row">
+          <form id="query-form" class="panel query-panel">
+            <label class="field-label" for="query-input">Research query</label>
+            <div class="query-controls">
+              <input
+                id="query-input"
+                name="query"
+                type="text"
+                placeholder="Run creation arrives in Slice 2."
+                disabled
+              />
+              <button type="submit" disabled>Start Run</button>
+            </div>
+          </form>
+
+          <section id="run-status" class="panel status-panel" aria-live="polite">
+            <p class="status-label">Run status</p>
+            <p class="empty-state">No run yet. Live execution arrives in later slices.</p>
+          </section>
+        </section>
+
+        <section class="content-grid">
+          <aside id="timeline-panel" class="panel timeline-panel">
+            <div class="panel-heading">
+              <h2>Pipeline Timeline</h2>
+            </div>
+            <ol class="timeline-list">
+              {% for step in steps %}
+              <li class="timeline-step">{{ step }}</li>
+              {% endfor %}
+            </ol>
+          </aside>
+
+          <section class="main-stack">
+            <section id="detail-panel" class="panel">
+              <div class="panel-heading">
+                <h2>Active Step Detail</h2>
+              </div>
+              <p class="empty-state">Step-level details will appear here once streaming is wired.</p>
+            </section>
+
+            <section id="report-panel" class="panel">
+              <div class="panel-heading">
+                <h2>Final Report</h2>
+              </div>
+              <p class="empty-state">The completed memo will render here in a later slice.</p>
+            </section>
+          </section>
+
+          <aside id="summary-panel" class="panel summary-panel">
+            <div class="panel-heading">
+              <h2>Run Summary</h2>
+            </div>
+            <p class="empty-state">
+              Snapshot cards for market data, sources, notes, and confidence will land here.
+            </p>
+          </aside>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,151 @@
+:root {
+  --paper: #f5f1e8;
+  --panel: #fbf8f2;
+  --line: #d8d0c2;
+  --ink: #16243a;
+  --muted: #556277;
+  --accent: #1f6d66;
+  --accent-soft: #deece9;
+  --shadow: rgba(20, 36, 58, 0.08);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(31, 109, 102, 0.08), transparent 28%),
+    linear-gradient(180deg, #f8f4eb 0%, var(--paper) 100%);
+  color: var(--ink);
+}
+
+.shell {
+  min-height: 100vh;
+  padding: 32px;
+}
+
+.workspace {
+  display: grid;
+  gap: 20px;
+}
+
+.top-row,
+.content-grid {
+  display: grid;
+  gap: 20px;
+}
+
+.top-row {
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+}
+
+.content-grid {
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(220px, 280px);
+  align-items: start;
+}
+
+.main-stack {
+  display: grid;
+  gap: 20px;
+}
+
+.panel {
+  background: rgba(251, 248, 242, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 20px;
+  box-shadow: 0 14px 36px var(--shadow);
+}
+
+.page-header h1,
+.panel-heading h2 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 600;
+}
+
+.page-header h1 {
+  font-size: clamp(2rem, 3vw, 3rem);
+}
+
+.eyebrow,
+.status-label,
+.field-label {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.subtitle,
+.empty-state {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.query-controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.query-controls input {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: #fffdf9;
+  color: var(--ink);
+}
+
+.query-controls button {
+  border: 0;
+  border-radius: 12px;
+  padding: 14px 18px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+  cursor: not-allowed;
+}
+
+.panel-heading {
+  margin-bottom: 14px;
+}
+
+.timeline-list {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 12px;
+}
+
+.timeline-step {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+@media (max-width: 1024px) {
+  .top-row,
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .shell {
+    padding: 20px;
+  }
+
+  .query-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
