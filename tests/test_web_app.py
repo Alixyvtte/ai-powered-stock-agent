@@ -27,13 +27,34 @@ def test_index_renders_workbench_shell() -> None:
     for region_id in [
         "app-header",
         "query-form",
+        "query-input",
+        "query-submit",
         "run-status",
+        "status-text",
+        "status-run-id",
+        "status-note",
         "timeline-panel",
+        "timeline-list",
         "detail-panel",
+        "detail-title",
+        "detail-timestamp",
+        "detail-summary",
+        "detail-warnings",
         "report-panel",
+        "report-body",
         "summary-panel",
+        "summary-cards",
+        "summary-market",
+        "summary-sources",
+        "summary-notes",
+        "summary-confidence",
+        "summary-followups",
     ]:
         assert f'id="{region_id}"' in html
 
     for step in ["plan", "market", "search_web", "extract", "decide", "write_report"]:
         assert step in html
+        assert f'data-step="{step}"' in html
+
+    assert 'id="query-input"' in html and "disabled" not in html.split('id="query-input"', 1)[1].split(">", 1)[0]
+    assert 'id="query-submit"' in html and "disabled" not in html.split('id="query-submit"', 1)[1].split(">", 1)[0]

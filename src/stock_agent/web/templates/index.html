@@ -28,16 +28,18 @@
                 id="query-input"
                 name="query"
                 type="text"
-                placeholder="Run creation arrives in Slice 2."
-                disabled
+                placeholder="Research NVDA supply chain resilience"
+                required
               />
-              <button type="submit" disabled>Start Run</button>
+              <button id="query-submit" type="submit">Start Run</button>
             </div>
           </form>
 
-          <section id="run-status" class="panel status-panel" aria-live="polite">
+          <section id="run-status" class="panel status-panel" aria-live="polite" data-state="idle">
             <p class="status-label">Run status</p>
-            <p class="empty-state">No run yet. Live execution arrives in later slices.</p>
+            <p id="status-text" class="status-value">Ready for a new research run.</p>
+            <p id="status-run-id" class="status-meta" hidden></p>
+            <p id="status-note" class="empty-state">Submit a query to stream the pipeline live.</p>
           </section>
         </section>
 
@@ -46,9 +48,12 @@
             <div class="panel-heading">
               <h2>Pipeline Timeline</h2>
             </div>
-            <ol class="timeline-list">
+            <ol id="timeline-list" class="timeline-list">
               {% for step in steps %}
-              <li class="timeline-step">{{ step }}</li>
+              <li class="timeline-step" data-step="{{ step }}" data-state="idle">
+                <span class="step-name">{{ step }}</span>
+                <span class="step-state">Idle</span>
+              </li>
               {% endfor %}
             </ol>
           </aside>
@@ -56,16 +61,25 @@
           <section class="main-stack">
             <section id="detail-panel" class="panel">
               <div class="panel-heading">
-                <h2>Active Step Detail</h2>
+                <div>
+                  <h2 id="detail-title">Active Step Detail</h2>
+                  <p id="detail-timestamp" class="detail-meta"></p>
+                </div>
               </div>
-              <p class="empty-state">Step-level details will appear here once streaming is wired.</p>
+              <p id="detail-empty" class="empty-state">
+                Step-level details will appear here once streaming begins.
+              </p>
+              <dl id="detail-summary" class="detail-list"></dl>
+              <ul id="detail-warnings" class="warning-list"></ul>
             </section>
 
             <section id="report-panel" class="panel">
               <div class="panel-heading">
                 <h2>Final Report</h2>
               </div>
-              <p class="empty-state">The completed memo will render here in a later slice.</p>
+              <div id="report-body" class="report-body empty-state">
+                The completed memo will render here automatically after the run finishes.
+              </div>
             </section>
           </section>
 
@@ -73,9 +87,33 @@
             <div class="panel-heading">
               <h2>Run Summary</h2>
             </div>
-            <p class="empty-state">
-              Snapshot cards for market data, sources, notes, and confidence will land here.
-            </p>
+            <div id="summary-cards" class="summary-cards">
+              <section id="summary-market" class="summary-card">
+                <h3>Market Snapshot</h3>
+                <p id="summary-market-value" class="summary-value">Waiting for market data.</p>
+                <p id="summary-market-meta" class="summary-meta">Coverage and key metrics will appear here.</p>
+              </section>
+              <section id="summary-sources" class="summary-card">
+                <h3>Sources</h3>
+                <p id="summary-sources-value" class="summary-value">Waiting for source search.</p>
+                <p id="summary-sources-meta" class="summary-meta">Source counts update after each search pass.</p>
+              </section>
+              <section id="summary-notes" class="summary-card">
+                <h3>Notes</h3>
+                <p id="summary-notes-value" class="summary-value">Waiting for extraction.</p>
+                <p id="summary-notes-meta" class="summary-meta">Extracted evidence notes will be counted here.</p>
+              </section>
+              <section id="summary-confidence" class="summary-card">
+                <h3>Evidence Confidence</h3>
+                <p id="summary-confidence-value" class="summary-value">Waiting for decision.</p>
+                <p id="summary-confidence-meta" class="summary-meta">The latest confidence assessment will appear here.</p>
+              </section>
+              <section id="summary-followups" class="summary-card">
+                <h3>Follow-up Queries</h3>
+                <p id="summary-followups-value" class="summary-value">0 follow-up queries</p>
+                <p id="summary-followups-meta" class="summary-meta">Loop decisions will update this count.</p>
+              </section>
+            </div>
           </aside>
         </section>
       </main>
