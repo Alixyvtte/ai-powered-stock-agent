@@ -10,7 +10,20 @@
 架构干净、工程底子好，但**研究深度被一个核心瓶颈卡住**：Agent 只在「搜索摘要 + 一份很薄的行情快照」上推理，**从未读过来源正文，也没有财务报表/历史价格/新闻/分析师预期**。
 `report.txt` 实测可证：最终来源 S1–S5 被标注为「not used to substantiate conclusions」，整篇报告几乎只靠 prompt 里的假设和行情数据撑起来 —— 这就是当前质量天花板。
 
-**优化主线**：先把「证据质量」做厚（正文抓取 + 财务数据），再把「Agent 推理」做深（综合判断 + 自我校验），最后把「Demo 表现力」做足（可视化 + 来源透明 + 导出）。
+**优化主线**：先把「证据质量」做厚（正文抓取 + 财务数据），再把「Agent 推理」做深（综合判断 + 自我校验），最后把「Demo 表现力」做足（可视化 + 来源透明 + 导出）。同时把**响应速度**作为一条贯穿始终的硬指标（见文末「⚡ 响应速度专项」）。
+
+---
+
+## ✅ 实施进度（截至最近一次更新）
+
+**团队已确认方向**：评审四维均衡（报告质量 + 技术创新/Agent 能力 + Demo 体验 + 合规负责任）；输出语言**跟随提问语言**；Demo 以 **Web 工作台**为主；模型用主办方 **miromind**（`mirothinker-1-7-deepresearch-mini`，OpenAI 兼容接口）。
+
+**已落地（已提交到 `feat/miromind-and-report-download`）**：
+- 环境：Python 3.12 + 全部依赖，测试基线 **50 passed**
+- **miromind 接入**：多 provider 自动识别（优先级 miromind > deepseek > openai），默认走稳健的手写 JSON 解析路径；附能力探测脚本 `scripts/probe_miromind.py`
+- **报告下载**：MD / PDF 双格式（fpdf2 + 系统 CJK 字体，中文正确渲染），Web 报告面板加下载按钮
+
+**待团队 review 后统一实施**：本文下述各项 —— 证据深度、Agent 推理（synthesize/verify）、Web 可视化、持久化、评测，以及 **⚡ 响应速度专项**（团队本轮重点关注）。
 
 ---
 
@@ -193,4 +206,97 @@ understand(plan+ticker解析+语言+market_type)
 ---
 
 ## 附：建议的依赖增项
-`trafilatura`（正文抽取）、`readability-lxml`、`diskcache` 或 `requests-cache`（缓存）、`tenacity`（重试）、`weasyprint` 或前端打印（PDF）、`pytest-asyncio`/`respx`（测试）、可选 `langchain-anthropic`（Claude 路径）、可选 `langsmith`（trace）。
+`trafilatura`（正文抽取）、`readability-lxml`、`diskcache` 或 `requests-cache`（缓存）、`tenacity`（重试）、`fpdf2`（PDF，已用）、`pytest-asyncio`/`respx`（测试）、可选 `langsmith`（trace）。
+
+---
+
+# ⚡ 响应速度专项优化（团队本轮重点）
+
+> 目标：在**不牺牲报告质量**的前提下，把一次完整研究的墙钟时间和**体感延迟**大幅压低。
+> 竞赛维度上「响应快」和「UI 呈现好」是两条可并行加分线，本专项覆盖前者 + 部分体感优化。
+
+## S1. 时间都花在哪（延迟拆解）
+
+当前流程：`plan → market → search_web → extract → decide →（loop）→ write_report`
+
+| 阶段 | LLM 调用 | 串行/并行 | 估算耗时* | 备注 |
+|---|---|---|---|---|
+| plan | 1 | — | ~3–6s | 单次模型调用 |
+| market | 0 | yfinance+akshare 并行(15s 超时) | ~10–15s | **美股也跑 akshare，必失败但等满超时** |
+| search_web | 0 | 多 query×多 provider 并行(~25s 截断) | ~5–25s | 长尾在超时 |
+| **extract** | **最多 8** | **❗串行**（`for source in batch`） | **~8×单次** | **最大瓶颈** |
+| decide | 1 | — | ~3–6s | |
+| **loop** | ×`max_iterations`(默认 2) | — | **上面 search+extract+decide 再来一遍** | 翻倍 |
+| write_report | 1 | — | ~8–20s | **一次性返回，无流式 → 体感"卡死"** |
+
+\* 估算基于「单次 LLM ≈ 5s」的假设；miromind 是 deepresearch 模型，实测单次可能更慢，**串行项的放大效应也更严重**（本机因网关拦截暂无法实测，需在可联通环境用 `probe_miromind.py` 标定单次延迟）。
+
+**结论**：最坏情况一次完整运行可达 **60–120s+**，其中 extract 串行 + 循环翻倍占大头，write_report 无流式拖垮体感。
+
+## S2. 优化项（按 ROI 排序，均为**纯提速、不牺牲质量**）
+
+| # | 优化 | 预期收益 | 工作量 | 风险 | 牺牲质量? |
+|---|---|---|---|---|---|
+| **P1** | **并行化 extract 的逐源 LLM 调用** | 🔴🔴🔴 墙钟从「8 次之和」→「最慢 1 次」 | 低 | 低 | 否 |
+| **P2** | **market 按 `market_type` 路由 + 单源限时** | 🟠 market 15s→~3s | 低 | 低 | 否(更准) |
+| **P3** | **缓存层**（搜索/正文/行情/LLM 按哈希，TTL） | 🔴 重复查询秒回（Demo 关键） | 中 | 低 | 否 |
+| **P4** | **流式输出报告**（write_report 边生成边推 SSE） | 🔴🔴 体感"立即响应" | 中(动 UI) | 低 | 否 |
+| **P5** | **plan→market/search 并行**（拓扑改造） | 🟠 省 min(market,search) | 中 | 中(LangGraph fan-in+loop 需谨慎) | 否 |
+| **P6** | **HTTP 连接复用 + 超时自适应**（`requests.Session`、provider 早返回） | 🟡 削长尾 | 低 | 低 | 否 |
+
+### P1 并行 extract（最高优先，先做）
+- 把 `for source in batch` 里的 `_extract_source_notes(llm, ...)` 用 `ThreadPoolExecutor` 并发（`max_workers=min(8, len(batch))`）。
+- **保持语义不变**：并发只用于"取 LLM 结果"，随后**仍按 batch 原顺序**串行做校验/去重/合并/`processed_source_ids` 标记 → 笔记顺序、跨源去重、失败隔离与"不重试失败源"全部与现状一致（现有 4 个 extract 测试可回归验证）。
+- 线程安全：JSON 解析路径每次独立请求；真实 `ChatOpenAI` 并发 invoke 安全。
+
+### P2 market 路由
+- `us_equity`→仅 yfinance；`a_share`→akshare(+yfinance 兜底)；`macro`→跳过个股；`multi_market`→双源。
+- 每个 fetch 单独超时；`datetime.utcnow()` 顺手改 timezone-aware。
+
+### P3 缓存层
+- key = `hash(provider + query/url/ticker + 关键参数)`；value 落磁盘（`diskcache`）带 TTL（搜索/正文 ~数小时，行情 ~分钟级）。
+- 可选 LLM 响应缓存（key=prompt 哈希）——对**重复 Demo、回归评测**极有用。
+- 提供"强制刷新"开关，避免演示时拿到过期数据。
+
+### P4 流式报告（体感最大）
+- `agent` 增加 `write_report` 的 token 级流式；新增 SSE 事件 `report_delta`；前端逐字渲染。
+- 用户在 ~1s 内就看到报告开头在"打字"，而不是干等十几秒。
+
+### P5 plan→market/search 并行（可选，收益依赖 P2）
+- market 与 search 仅依赖 plan、写互不相交的 state（`market` vs `sources`），可并行扇出、扇入到 extract。
+- 注意 LangGraph 在**循环**下的 fan-in 行为：decide 回边只应重跑 search，不应重跑 market。需小心设计，故列为中风险。
+- 若 P2 已让 market 降到 ~3s，本项边际收益下降，**可后置**。
+
+## S3. 质量↔速度 可调档（需团队定默认值）
+
+这些**会影响覆盖深度**，建议做成预设档位让用户/评委现场切换：
+
+| 参数 | 快档 | 标准档 | 深度档 |
+|---|---|---|---|
+| `max_iterations` | 1 | 2 | 3 |
+| extract 来源数/轮 | 5 | 8 | 12 |
+| 搜索超时 | 12s | 20s | 30s |
+| 正文抓取(若上线) | 关 | Top-3 | Top-6 |
+
+- 建议默认**标准档**，Demo 现场可一键切"快档"求响应速度，或"深度档"求报告质量。
+- 智能化：`decide` 已能判断 `evidence_confidence`，可让"证据已充分"时**提前结束循环**（动态省一轮）。
+
+## S4. 体感优化（UI 层，与「UI 呈现好」那条线协同）
+- **流式报告**（P4）：最重要的体感项。
+- **更细粒度进度**：来源逐条出现、笔记逐条出现（现为整步刷新）。
+- **首字节优先**：plan 一生成就把"研究计划/子问题"亮出来，让用户立刻看到 Agent 在干活。
+- **骨架屏 / 阶段预计耗时**：每步显示预估时间条，降低"卡住"焦虑。
+
+## S5. 度量与验收
+- 各节点已有 `_logger` 计时；补一个**端到端总延迟**指标，并在 SSE/快照里透出（UI 可显示"本次耗时 Xs"）。
+- 评测集（Phase 5）记录 **P50/P95 延迟**，形成"优化前 vs 后"对比表 —— 答辩硬数据。
+- 验收目标（建议，待实测标定后定稿）：标准档**端到端 P50 ≤ 现状的 40%**；首字节（plan 出现）≤ 5s；报告开始流式 ≤ 首个 token 可见。
+
+## S6. 落地顺序建议
+1. **P1 并行 extract**（最大赢面、最独立、可测）
+2. **P2 market 路由**（顺带修 utcnow / akshare 浪费）
+3. **P6 连接复用 + 超时自适应**（低成本削长尾）
+4. **P3 缓存层**（Demo / 评测收益大）
+5. **P4 流式报告**（体感飞跃，配合 UI 线）
+6. **P5 plan→market/search 并行**（可选，视 P2 后收益）
+7. **S3 档位预设 + S5 度量**（收尾，提供现场可调 + 答辩数据）
