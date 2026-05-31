@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
 from typing import Any, Callable
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from stock_agent.agent import DeepSearchAgent
+from stock_agent.config import AgentConfig, normalize_mode
 from stock_agent.event_adapter import build_run_failed_event
 
+from .export import build_report_markdown, markdown_to_pdf_bytes, safe_filename
 from .presentation import build_run_presentation, render_final_report_html
 from .runs import InMemoryRunStore, RunStatus, ActiveRunConflictError
 
@@ -25,8 +29,38 @@ STATIC_DIR = BASE_DIR / "static"
 TERMINAL_EVENT_TYPES = {"run_completed", "run_failed"}
 
 
+def _content_disposition(slug: str, ext: str) -> str:
+    """Build a Content-Disposition header that survives non-ASCII filenames.
+
+    Provides an ASCII ``filename=`` fallback plus an RFC 5987 ``filename*=``
+    UTF-8 variant so Chinese report names download cleanly across browsers.
+    """
+    ascii_slug = slug.encode("ascii", "ignore").decode("ascii").strip("-") or "stock-research"
+    utf8_name = quote(f"{slug}.{ext}")
+    return f'attachment; filename="{ascii_slug}.{ext}"; filename*=UTF-8\'\'{utf8_name}'
+
+
+def _report_slug(run: Any) -> str:
+    plan = run.snapshot.get("plan") if isinstance(run.snapshot, dict) else None
+    topic = plan.get("topic") if isinstance(plan, dict) else None
+    return safe_filename(run.query or topic or "")
+
+
+def _build_markdown_for_run(run: Any) -> str:
+    snapshot = run.snapshot if isinstance(run.snapshot, dict) else {}
+    plan = snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else {}
+    return build_report_markdown(
+        query=run.query,
+        topic=(plan or {}).get("topic"),
+        final_report=run.final_report or "",
+        evidence_confidence=snapshot.get("evidence_confidence"),
+        generated_at=run.finished_at.isoformat() if run.finished_at else None,
+    )
+
+
 class CreateRunRequest(BaseModel):
     query: str
+    mode: str | None = None  # fast | standard | deep (speed/quality preset)
 
 
 class CreateRunResponse(BaseModel):
@@ -43,6 +77,19 @@ class MarketHighlightResponse(BaseModel):
     trailing_pe: float | int | None = None
     forward_pe: float | int | None = None
     dividend_yield: float | int | None = None
+    week_52_high: float | int | None = None
+    week_52_low: float | int | None = None
+
+
+class RunListItemResponse(BaseModel):
+    run_id: str
+    query: str
+    status: RunStatus
+    mode: str = "standard"
+    created_at: datetime
+    updated_at: datetime
+    latest_node: str | None = None
+    duration_s: float | None = None
 
 
 class RunSnapshotResponse(BaseModel):
@@ -54,6 +101,7 @@ class RunSnapshotResponse(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     latest_node: str | None = None
+    duration_s: float | None = None
     snapshot: dict[str, Any]
     summaries: dict[str, dict[str, Any]]
     final_report: str | None = None
@@ -70,7 +118,17 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="Stock Agent Analyst Workbench")
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    store = run_store or InMemoryRunStore()
+    if run_store is not None:
+        store = run_store
+    else:
+        # Default store persists run history to SQLite so runs survive restarts.
+        try:
+            from .persistence import SqliteRunPersistence
+
+            db_path = os.getenv("STOCK_AGENT_DB", ".cache/stock_agent/runs.db")
+            store = InMemoryRunStore(persistence=SqliteRunPersistence(db_path))
+        except Exception:
+            store = InMemoryRunStore()
     build_agent = agent_factory or DeepSearchAgent
 
     app.state.run_store = store
@@ -89,7 +147,12 @@ def create_app(
             return
 
         try:
-            agent = build_agent()
+            # The default factory honours the run's speed/quality preset; an
+            # injected factory (e.g. in tests) is used as-is.
+            if build_agent is DeepSearchAgent:
+                agent = DeepSearchAgent(AgentConfig.from_env(mode=run.mode))
+            else:
+                agent = build_agent()
             for event in agent.stream_events(run.query):
                 if str(event.get("type") or "") == "run_completed":
                     event = {
@@ -121,13 +184,42 @@ def create_app(
     )
     def create_run(payload: CreateRunRequest) -> CreateRunResponse:
         try:
-            run = store.create_run(payload.query)
+            run = store.create_run(payload.query, mode=normalize_mode(payload.mode))
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except ActiveRunConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
         return CreateRunResponse(run_id=run.run_id, status=run.status)
+
+    @app.get("/api/runs", response_model=list[RunListItemResponse])
+    def list_runs() -> list[RunListItemResponse]:
+        items: list[RunListItemResponse] = []
+        for run in store.list_runs():
+            duration = None
+            if run.started_at and run.finished_at:
+                duration = round(max((run.finished_at - run.started_at).total_seconds(), 0.0), 2)
+            items.append(
+                RunListItemResponse(
+                    run_id=run.run_id,
+                    query=run.query,
+                    status=run.status,
+                    mode=run.mode,
+                    created_at=run.created_at,
+                    updated_at=run.updated_at,
+                    latest_node=run.latest_node,
+                    duration_s=duration,
+                )
+            )
+        return items
+
+    @app.post("/api/runs/{run_id}/cancel")
+    def cancel_run(run_id: str) -> dict[str, Any]:
+        try:
+            run = store.cancel_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.") from exc
+        return {"run_id": run.run_id, "status": run.status.value}
 
     @app.get("/api/runs/{run_id}", response_model=RunSnapshotResponse)
     def get_run_snapshot(run_id: str) -> RunSnapshotResponse:
@@ -143,6 +235,12 @@ def create_app(
             events=run.events,
         )
 
+        duration_s: float | None = None
+        if run.started_at is not None:
+            end = run.finished_at or run.updated_at
+            if end is not None:
+                duration_s = round(max((end - run.started_at).total_seconds(), 0.0), 2)
+
         return RunSnapshotResponse(
             run_id=run.run_id,
             query=run.query,
@@ -152,6 +250,7 @@ def create_app(
             started_at=run.started_at,
             finished_at=run.finished_at,
             latest_node=run.latest_node,
+            duration_s=duration_s,
             snapshot=run.snapshot,
             summaries=run.summaries,
             final_report=run.final_report,
@@ -168,10 +267,50 @@ def create_app(
                     trailing_pe=highlight.trailing_pe,
                     forward_pe=highlight.forward_pe,
                     dividend_yield=highlight.dividend_yield,
+                    week_52_high=highlight.week_52_high,
+                    week_52_low=highlight.week_52_low,
                 )
                 for highlight in presentation.market_highlights
             ],
             error=run.error,
+        )
+
+    def _require_downloadable_run(run_id: str):
+        run = store.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
+        if run.status is not RunStatus.COMPLETED or not (run.final_report or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The report is not ready for download yet.",
+            )
+        return run
+
+    @app.get("/api/runs/{run_id}/report.md")
+    def download_report_markdown(run_id: str) -> Response:
+        run = _require_downloadable_run(run_id)
+        markdown_doc = _build_markdown_for_run(run)
+        return Response(
+            content=markdown_doc,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": _content_disposition(_report_slug(run), "md")},
+        )
+
+    @app.get("/api/runs/{run_id}/report.pdf")
+    def download_report_pdf(run_id: str) -> Response:
+        run = _require_downloadable_run(run_id)
+        markdown_doc = _build_markdown_for_run(run)
+        try:
+            pdf_bytes = markdown_to_pdf_bytes(markdown_doc)
+        except Exception as exc:  # pragma: no cover - depends on fpdf2/runtime fonts
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"PDF generation failed: {exc}",
+            ) from exc
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": _content_disposition(_report_slug(run), "pdf")},
         )
 
     @app.get("/api/runs/{run_id}/events")
@@ -219,9 +358,12 @@ def create_app(
                     "plan",
                     "market",
                     "search_web",
+                    "fetch_content",
                     "extract",
                     "decide",
+                    "synthesize",
                     "write_report",
+                    "verify",
                 ],
             },
         )

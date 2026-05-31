@@ -23,6 +23,7 @@ class RunRecord:
     status: RunStatus
     created_at: datetime
     updated_at: datetime
+    mode: str = "standard"
     started_at: datetime | None = None
     finished_at: datetime | None = None
     latest_node: str | None = None
@@ -39,13 +40,27 @@ class ActiveRunConflictError(RuntimeError):
 
 
 class InMemoryRunStore:
-    def __init__(self) -> None:
+    def __init__(self, persistence: Any = None) -> None:
         self._lock = Lock()
         self._runs: dict[str, RunRecord] = {}
         self._active_run_id: str | None = None
         self._conditions: dict[str, Condition] = {}
+        # Optional write-through persistence (e.g. SqliteRunPersistence). Live
+        # event streaming stays fully in-memory; only finished runs are persisted.
+        self._persistence = persistence
+        if persistence is not None:
+            try:
+                for record in persistence.load_all():
+                    self._runs[record.run_id] = record
+                    self._conditions[record.run_id] = Condition(self._lock)
+            except Exception:
+                pass
 
-    def create_run(self, query: str) -> RunRecord:
+    def _persist_unlocked(self, run: RunRecord) -> None:
+        if self._persistence is not None:
+            self._persistence.save_run(run)
+
+    def create_run(self, query: str, mode: str = "standard") -> RunRecord:
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("Query must not be empty.")
@@ -62,10 +77,12 @@ class InMemoryRunStore:
                 status=RunStatus.QUEUED,
                 created_at=now,
                 updated_at=now,
+                mode=mode,
             )
             self._runs[run.run_id] = run
             self._active_run_id = run.run_id
             self._conditions[run.run_id] = Condition(self._lock)
+            self._persist_unlocked(run)
             return run
 
     def get_run(self, run_id: str) -> RunRecord | None:
@@ -75,6 +92,29 @@ class InMemoryRunStore:
     def get_active_run(self) -> RunRecord | None:
         with self._lock:
             return self._get_active_run_unlocked()
+
+    def list_runs(self) -> list[RunRecord]:
+        """All runs, newest first (for the run-history view)."""
+        with self._lock:
+            return sorted(self._runs.values(), key=lambda r: r.created_at, reverse=True)
+
+    def cancel_run(self, run_id: str) -> RunRecord:
+        """Soft-cancel: mark the run failed, free the active slot, and notify the
+        SSE stream to end. An already-terminal run is returned unchanged."""
+        with self._lock:
+            run = self._require_run_unlocked(run_id)
+            if run.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                return run
+            now = datetime.now(timezone.utc)
+            run.status = RunStatus.FAILED
+            run.error = "Run cancelled by user."
+            run.finished_at = now
+            run.updated_at = now
+            if self._active_run_id == run_id:
+                self._active_run_id = None
+            self._persist_unlocked(run)
+            self._conditions[run_id].notify_all()
+            return run
 
     def start_run(self, run_id: str) -> tuple[RunRecord, bool]:
         with self._lock:
@@ -92,6 +132,10 @@ class InMemoryRunStore:
     def append_event(self, run_id: str, event: dict[str, Any]) -> RunRecord:
         with self._lock:
             run = self._require_run_unlocked(run_id)
+            # Ignore late events for an already-terminal run (e.g. an orphaned
+            # worker after a cancel) so it cannot be silently "un-cancelled".
+            if run.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                return run
             stored_event = deepcopy(event)
             run.events.append(stored_event)
 
@@ -134,6 +178,9 @@ class InMemoryRunStore:
                     self._active_run_id = None
             else:
                 run.updated_at = now
+
+            if run.status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                self._persist_unlocked(run)
 
             self._conditions[run_id].notify_all()
             return run
@@ -206,6 +253,7 @@ class InMemoryRunStore:
             run.updated_at = now
             if self._active_run_id == run_id:
                 self._active_run_id = None
+            self._persist_unlocked(run)
             self._conditions[run_id].notify_all()
             return run
 
@@ -235,6 +283,7 @@ class InMemoryRunStore:
             run.updated_at = now
             if self._active_run_id == run_id:
                 self._active_run_id = None
+            self._persist_unlocked(run)
             self._conditions[run_id].notify_all()
             return run
 

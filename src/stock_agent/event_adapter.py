@@ -8,9 +8,12 @@ SUPPORTED_NODES = (
     "plan",
     "market",
     "search_web",
+    "fetch_content",
     "extract",
     "decide",
+    "synthesize",
     "write_report",
+    "verify",
 )
 
 
@@ -52,11 +55,43 @@ class RunFailedEvent(TypedDict, total=False):
     timestamp: str
 
 
-WorkbenchEvent = RunStartedEvent | StepCompletedEvent | RunCompletedEvent | RunFailedEvent
+class ReportDeltaEvent(TypedDict):
+    type: Literal["report_delta"]
+    text: str
+    timestamp: str
+
+
+WorkbenchEvent = (
+    RunStartedEvent | StepCompletedEvent | RunCompletedEvent | RunFailedEvent | ReportDeltaEvent
+)
+
+
+_SOURCE_CONTENT_PREVIEW = 200
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _lighten_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Trim heavy source bodies from the workbench snapshot.
+
+    The agent's internal state keeps full article text for extraction, but the
+    surfaced snapshot (streamed in every SSE event and persisted) only needs each
+    source's title / url / fetched flag plus the distilled notes — not the full
+    body. Truncating here keeps event payloads and the run DB small.
+    """
+    sources = snapshot.get("sources")
+    if not isinstance(sources, list):
+        return snapshot
+    light = dict(snapshot)
+    light["sources"] = [
+        {**s, "content": str(s.get("content") or "")[:_SOURCE_CONTENT_PREVIEW]}
+        if isinstance(s, dict) and s.get("content")
+        else s
+        for s in sources
+    ]
+    return light
 
 
 def _is_supported_node(node: str) -> bool:
@@ -143,6 +178,14 @@ def summarize_step(node: str, state_before: dict[str, Any], state_after: dict[st
             "new_sources": max(total_sources - previous_sources, 0),
         }
 
+    if node == "fetch_content":
+        sources = state_after.get("sources") or []
+        fetched = sum(1 for s in sources if isinstance(s, dict) and s.get("fetched"))
+        return {
+            "total_sources": len(sources),
+            "fetched_sources": fetched,
+        }
+
     if node == "extract":
         total_notes = len(state_after.get("notes") or [])
         previous_notes = len(state_before.get("notes") or [])
@@ -159,9 +202,26 @@ def summarize_step(node: str, state_before: dict[str, Any], state_after: dict[st
             "evidence_confidence": str(state_after.get("evidence_confidence") or ""),
         }
 
+    if node == "synthesize":
+        thesis = cast(dict[str, Any], state_after.get("thesis") or {})
+        return {
+            "verdict": str(thesis.get("verdict") or ""),
+            "conviction": str(thesis.get("conviction") or ""),
+            "bull_count": len(thesis.get("bull_points") or []),
+            "bear_count": len(thesis.get("bear_points") or []),
+        }
+
     if node == "write_report":
         report = str(state_after.get("final_report") or "")
         return {"report_length": len(report)}
+
+    if node == "verify":
+        verification = cast(dict[str, Any], state_after.get("verification") or {})
+        return {
+            "citations": int(verification.get("citations") or 0),
+            "invalid_citations": int(verification.get("invalid_citations") or 0),
+            "passed": bool(verification.get("passed", True)),
+        }
 
     return {}
 
@@ -196,6 +256,15 @@ def collect_step_warnings(node: str, summary: dict[str, Any]) -> list[WarningPay
             }
         )
 
+    if node == "verify" and (summary.get("invalid_citations", 0) > 0 or not summary.get("passed", True)):
+        warnings.append(
+            {
+                "code": "verification_issue",
+                "severity": "warning",
+                "message": "The self-check flagged citation or completeness issues; read the memo cautiously.",
+            }
+        )
+
     return warnings
 
 
@@ -209,14 +278,14 @@ def build_step_event(
     if not _is_supported_node(node):
         return None
 
-    next_snapshot = _apply_state_patch(state_before, state_patch)
+    next_snapshot = _lighten_snapshot(_apply_state_patch(state_before, state_patch))
     summary = summarize_step(node, state_before, next_snapshot)
     return StepCompletedEvent(
         type="step_completed",
         node=node,
         summary=summary,
         warnings=collect_step_warnings(node, summary),
-        state_patch=dict(state_patch),
+        state_patch=_lighten_snapshot(dict(state_patch)),
         snapshot=next_snapshot,
         timestamp=timestamp or _utc_now_iso(),
     )
@@ -231,7 +300,7 @@ def build_run_started_event(
     return RunStartedEvent(
         type="run_started",
         query=query,
-        snapshot=dict(snapshot),
+        snapshot=_lighten_snapshot(dict(snapshot)),
         timestamp=timestamp or _utc_now_iso(),
     )
 
@@ -244,7 +313,15 @@ def build_run_completed_event(
     return RunCompletedEvent(
         type="run_completed",
         final_report=str(snapshot.get("final_report") or ""),
-        snapshot=dict(snapshot),
+        snapshot=_lighten_snapshot(dict(snapshot)),
+        timestamp=timestamp or _utc_now_iso(),
+    )
+
+
+def build_report_delta_event(text: str, *, timestamp: str | None = None) -> ReportDeltaEvent:
+    return ReportDeltaEvent(
+        type="report_delta",
+        text=text,
         timestamp=timestamp or _utc_now_iso(),
     )
 
@@ -259,7 +336,7 @@ def build_run_failed_event(
     event: RunFailedEvent = {
         "type": "run_failed",
         "error": error,
-        "snapshot": dict(snapshot),
+        "snapshot": _lighten_snapshot(dict(snapshot)),
         "timestamp": timestamp or _utc_now_iso(),
     }
     if node is not None:
@@ -270,8 +347,10 @@ def build_run_failed_event(
 __all__ = [
     "SUPPORTED_NODES",
     "StepCompletedEvent",
+    "ReportDeltaEvent",
     "WarningPayload",
     "WorkbenchEvent",
+    "build_report_delta_event",
     "build_run_completed_event",
     "build_run_failed_event",
     "build_run_started_event",

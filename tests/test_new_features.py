@@ -9,9 +9,7 @@ Tests for the new features added to plan_node, market_node, and decide_node:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Any, Dict, List
-from unittest.mock import MagicMock
+from dataclasses import dataclass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -54,8 +52,9 @@ class _FakeLLM:
                 )
             if "Schema name: EvidenceNotes" in prompt:
                 return _Msg(
-                    '{"items":[{"source_id":1,"claim":"revenue grew 10%",'
-                    '"why_it_matters":"top-line growth signal"}]}'
+                    '{"items":[{"source_id":1,'
+                    '"claim":"Data center revenue grew 10 percent year over year in the latest quarter.",'
+                    '"why_it_matters":"Top-line growth signals resilient demand and supports the earnings trajectory."}]}'
                 )
             if "Schema name: FollowupDecision" in prompt:
                 need = str(self._need_more).lower()
@@ -63,8 +62,17 @@ class _FakeLLM:
                     f'{{"need_more":{need},"followup_queries":[],"missing_angles":[],'
                     f'"evidence_confidence":"{self._evidence_confidence}","refusal_reason":""}}'
                 )
+            if "Schema name: InvestmentThesis" in prompt:
+                return _Msg(
+                    '{"verdict":"bullish","conviction":"medium",'
+                    '"bull_points":["AI demand is strong [S1]"],'
+                    '"bear_points":["Valuation is rich"],'
+                    '"valuation_view":"Premium multiple vs peers","price_view":"Below analyst target"}'
+                )
+            if "Schema name: VerificationResult" in prompt:
+                return _Msg('{"passed":true,"issues":[]}')
             # write_node (free-form)
-            return _Msg("## Final Report\nResearch as of 2026-03-21T00:00:00Z.")
+            return _Msg("## Final Report\nResearch as of 2026-03-21T00:00:00Z. [S1]")
 
         # ── Structured output path (OpenAI) ──
         name = getattr(schema, "__name__", str(schema))
@@ -80,8 +88,8 @@ class _FakeLLM:
         if name == "EvidenceNotes":
             return schema(items=[{
                 "source_id": 1,
-                "claim": "revenue grew 10%",
-                "why_it_matters": "top-line growth signal",
+                "claim": "Data center revenue grew 10 percent year over year in the latest quarter.",
+                "why_it_matters": "Top-line growth signals resilient demand and supports the earnings trajectory.",
             }])
         if name == "FollowupDecision":
             return schema(
@@ -162,7 +170,6 @@ def test_classify_source_aggregator():
 def test_plan_node_sets_research_timestamp_and_market_type(monkeypatch):
     from stock_agent.config import AgentConfig
     from stock_agent.graphs import deep_search_graph as gmod
-    from stock_agent.tools.web_search import WebDocument
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     monkeypatch.setattr(gmod, "get_chat_model", lambda cfg: _FakeLLM(market_type="us_equity"))
@@ -206,7 +213,8 @@ def test_plan_node_initializes_all_new_state_fields(monkeypatch):
 # Test 3: market_node calls both yfinance and akshare
 # ─────────────────────────────────────────────────────────────
 
-def test_market_node_calls_both_sources(monkeypatch):
+def test_market_node_us_equity_skips_akshare(monkeypatch):
+    """P2 routing: a US-equity plan hits yfinance only, skipping the slow akshare scrape."""
     from stock_agent.config import AgentConfig
     from stock_agent.graphs import deep_search_graph as gmod
 
@@ -222,24 +230,56 @@ def test_market_node_calls_both_sources(monkeypatch):
         return _fake_a_share_snapshot(ticker)
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.setattr(gmod, "get_chat_model", lambda cfg: _FakeLLM())
+    monkeypatch.setattr(gmod, "get_chat_model", lambda cfg: _FakeLLM(market_type="us_equity"))
     monkeypatch.setattr(gmod, "web_search", _fake_web_search)
     monkeypatch.setattr(gmod, "fetch_market_snapshot", tracked_yf)
     monkeypatch.setattr(gmod, "fetch_a_share_snapshot", tracked_ak)
 
     graph = gmod.build_deep_search_graph(AgentConfig(max_iterations=1, max_results_per_query=1))
-    out = graph.invoke({"query": "研究NVDA", "max_iterations": 1})
+    out = graph.invoke({"query": "Research NVDA", "max_iterations": 1})
 
-    # Both fetchers must have been called
-    assert len(yf_calls) >= 1, "fetch_market_snapshot (yfinance) was not called"
-    assert len(ak_calls) >= 1, "fetch_a_share_snapshot (akshare) was not called"
+    assert len(yf_calls) >= 1, "yfinance should be called for a US equity"
+    assert ak_calls == [], "akshare must be skipped for us_equity (P2 routing)"
 
-    # market dict should be nested {ticker: {yfinance: ..., akshare: ...}}
     market = out.get("market") or {}
     assert market, "market should not be empty"
     ticker_key = list(market.keys())[0]
-    assert "yfinance" in market[ticker_key] or "_fetch_yf" in str(market[ticker_key])
-    assert "akshare" in market[ticker_key] or "_fetch_ak" in str(market[ticker_key])
+    assert "yfinance" in market[ticker_key]
+    assert "akshare" not in market[ticker_key]
+
+
+def test_market_node_a_share_uses_both_sources(monkeypatch):
+    """P2 routing: an A-share plan uses akshare (primary) plus yfinance fallback."""
+    from stock_agent.config import AgentConfig
+    from stock_agent.graphs import deep_search_graph as gmod
+
+    yf_calls = []
+    ak_calls = []
+
+    def tracked_yf(ticker):
+        yf_calls.append(ticker)
+        return _fake_market_snapshot(ticker)
+
+    def tracked_ak(ticker):
+        ak_calls.append(ticker)
+        return _fake_a_share_snapshot(ticker)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.setattr(gmod, "get_chat_model", lambda cfg: _FakeLLM(market_type="a_share"))
+    monkeypatch.setattr(gmod, "web_search", _fake_web_search)
+    monkeypatch.setattr(gmod, "fetch_market_snapshot", tracked_yf)
+    monkeypatch.setattr(gmod, "fetch_a_share_snapshot", tracked_ak)
+
+    graph = gmod.build_deep_search_graph(AgentConfig(max_iterations=1, max_results_per_query=1))
+    out = graph.invoke({"query": "研究贵州茅台", "max_iterations": 1})
+
+    assert len(yf_calls) >= 1, "yfinance fallback should be called for a_share"
+    assert len(ak_calls) >= 1, "akshare should be called for a_share"
+
+    market = out.get("market") or {}
+    assert market, "market should not be empty"
+    ticker_key = list(market.keys())[0]
+    assert "akshare" in market[ticker_key]
 
 
 def test_market_node_no_tickers_returns_empty(monkeypatch):
@@ -432,3 +472,24 @@ def test_graph_smoke_updated(monkeypatch):
     assert out.get("research_timestamp"), "research_timestamp must be set"
     assert out.get("evidence_confidence") in {"high", "medium", "low", "insufficient"}
     assert isinstance(out.get("all_missing_angles"), list)
+    # Chinese query -> report language follows the query (#9)
+    assert out.get("language") == "Chinese"
+    # synthesize produced a structured thesis used as the memo backbone (#7)
+    thesis = out.get("thesis") or {}
+    assert thesis.get("verdict") == "bullish"
+    assert thesis.get("conviction") == "medium"
+    assert len(thesis.get("bull_points") or []) >= 1
+    # verify ran the citation self-check and kept the valid [S1] citation (#8)
+    verification = out.get("verification") or {}
+    assert verification.get("passed") is True
+    assert verification.get("invalid_citations") == 0
+    assert verification.get("citations", 0) >= 1
+
+
+def test_detect_language_follows_query():
+    from stock_agent.graphs.deep_search_graph import _detect_language
+
+    assert _detect_language("研究英伟达未来催化剂") == "Chinese"
+    assert _detect_language("Analyze NVDA catalysts") == "English"
+    assert _detect_language("NVDA 英伟达") == "Chinese"  # mixed -> Chinese
+    assert _detect_language("") == "English"

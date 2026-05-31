@@ -183,7 +183,8 @@ def test_build_step_event_adds_high_signal_warnings() -> None:
 
 def test_stream_events_emits_ordered_events_and_filters_unknown_updates(monkeypatch) -> None:
     agent = object.__new__(DeepSearchAgent)
-    agent._config = AgentConfig(max_iterations=2)
+    # stream_tokens=False exercises the updates-only path driven by self.stream.
+    agent._config = AgentConfig(max_iterations=2, stream_tokens=False)
 
     def fake_stream(query: str) -> Iterator[tuple[str, dict[str, Any]]]:
         assert query == "Research NVDA"
@@ -240,7 +241,7 @@ def test_stream_events_emits_ordered_events_and_filters_unknown_updates(monkeypa
 
 def test_stream_events_emits_run_failed_with_last_snapshot(monkeypatch) -> None:
     agent = object.__new__(DeepSearchAgent)
-    agent._config = AgentConfig(max_iterations=1)
+    agent._config = AgentConfig(max_iterations=1, stream_tokens=False)
 
     def failing_stream(query: str) -> Iterator[tuple[str, dict[str, Any]]]:
         assert query == "Research AMD"
@@ -268,3 +269,60 @@ def test_stream_events_emits_run_failed_with_last_snapshot(monkeypatch) -> None:
     assert failed_event["error"] == "simulated stream failure"
     assert failed_event["node"] == "plan"
     assert failed_event["snapshot"]["plan"]["topic"] == "AMD research"
+
+
+def test_stream_events_streams_report_tokens(monkeypatch) -> None:
+    """With stream_tokens=True, write_report tokens surface as report_delta events
+    interleaved with step events, via LangGraph's combined updates+messages stream."""
+
+    class _Chunk:
+        def __init__(self, content: str):
+            self.content = content
+
+    class _FakeGraph:
+        def stream(self, state, stream_mode=None):
+            assert stream_mode == ["updates", "messages"]
+            yield "updates", {"plan": {"plan": {"topic": "NVDA", "tickers": [], "subqueries": ["q"]}, "subqueries": ["q"]}}
+            # tokens from another node must be ignored
+            yield "messages", (_Chunk("noise"), {"langgraph_node": "extract"})
+            yield "messages", (_Chunk("Memo "), {"langgraph_node": "write_report"})
+            yield "messages", (_Chunk("body."), {"langgraph_node": "write_report"})
+            yield "updates", {"write_report": {"final_report": "Memo body."}}
+
+    agent = object.__new__(DeepSearchAgent)
+    agent._config = AgentConfig(max_iterations=1, stream_tokens=True)
+    agent._graph = _FakeGraph()
+    monkeypatch.setattr("stock_agent.event_adapter._utc_now_iso", lambda: "2026-04-04T00:00:00+00:00")
+
+    events = list(agent.stream_events("Research NVDA"))
+
+    assert [event["type"] for event in events] == [
+        "run_started",
+        "step_completed",   # plan
+        "report_delta",     # "Memo " (extract noise filtered out)
+        "report_delta",     # "body."
+        "step_completed",   # write_report
+        "run_completed",
+    ]
+    deltas = [event["text"] for event in events if event["type"] == "report_delta"]
+    assert deltas == ["Memo ", "body."]
+    assert "".join(deltas) == "Memo body."
+    assert events[-1]["final_report"] == "Memo body."
+
+
+def test_step_event_lightens_source_content():
+    """The surfaced snapshot truncates heavy source bodies (kept full only in
+    the agent's internal state) to keep SSE payloads and the run DB small."""
+    from stock_agent.event_adapter import build_step_event
+
+    long_body = "x" * 5000
+    event = build_step_event(
+        "search_web",
+        {"query": "q"},
+        {"sources": [{"id": 1, "title": "T", "url": "https://e.com/1", "content": long_body}]},
+    )
+    assert event is not None
+    snap_sources = event["snapshot"]["sources"]
+    assert len(snap_sources[0]["content"]) <= 200          # trimmed
+    assert snap_sources[0]["url"] == "https://e.com/1"      # other fields intact
+    assert event["summary"]["total_sources"] == 1           # counts unaffected

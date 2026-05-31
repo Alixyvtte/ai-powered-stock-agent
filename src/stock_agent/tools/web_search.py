@@ -5,9 +5,15 @@ import os
 import requests
 import concurrent.futures
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
+
+from .. import cache
 
 logger = logging.getLogger(__name__)
+
+# P6: a shared Session reuses TCP/TLS connections across the many calls a single
+# search pass makes to the same provider host (serper.dev / serpapi.com).
+_SESSION = requests.Session()
 
 @dataclass(frozen=True)
 class WebDocument:
@@ -57,7 +63,7 @@ def _search_serper(query: str, max_results: int, timeout_s: int) -> List[WebDocu
         "Content-Type": "application/json"
     }
     try:
-        resp = requests.post("https://google.serper.dev/search", headers=headers, json={"q": query, "num": max_results}, timeout=timeout_s)
+        resp = _SESSION.post("https://google.serper.dev/search", headers=headers, json={"q": query, "num": max_results}, timeout=timeout_s)
         if resp.status_code == 200:
             results = resp.json().get("organic", [])
             docs: List[WebDocument] = []
@@ -79,7 +85,7 @@ def _search_serpapi(query: str, max_results: int, timeout_s: int) -> List[WebDoc
         return []
     
     try:
-        resp = requests.get("https://serpapi.com/search.json", params={"q": query, "api_key": serpapi_key, "num": max_results}, timeout=timeout_s)
+        resp = _SESSION.get("https://serpapi.com/search.json", params={"q": query, "api_key": serpapi_key, "num": max_results}, timeout=timeout_s)
         if resp.status_code == 200:
             results = resp.json().get("organic_results", [])
             docs: List[WebDocument] = []
@@ -116,6 +122,31 @@ def _search_duckduckgo(query: str, max_results: int) -> List[WebDocument]:
 
 
 def web_search(query: str, max_results: int = 5, timeout_s: int = 25) -> List[WebDocument]:
+    """Cached web search across providers.
+
+    Results are memoized to disk (TTL ~6h); only non-empty result sets are
+    cached so a transient provider failure never poisons the cache. The actual
+    retrieval lives in ``_web_search_uncached``.
+    """
+    key = f"{query}||{max_results}"
+    hit = cache.get("search", key, cache.TTL_SEARCH)
+    if hit:  # non-empty cached list
+        return [
+            WebDocument(
+                title=d.get("title", ""),
+                url=d.get("url", ""),
+                content=d.get("content", ""),
+            )
+            for d in hit
+        ]
+
+    docs = _web_search_uncached(query, max_results, timeout_s)
+    if docs:
+        cache.set("search", key, [{"title": d.title, "url": d.url, "content": d.content} for d in docs])
+    return docs
+
+
+def _web_search_uncached(query: str, max_results: int = 5, timeout_s: int = 25) -> List[WebDocument]:
     """
     Executes a web search across multiple available providers concurrently.
     Optimized for agent usage: uses Tavily, Serper, SerpApi, and falls back to DuckDuckGo.

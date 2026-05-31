@@ -17,6 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("query", help="研究问题，例如：深度研究 NVDA 未来6-12个月催化剂与风险")
     p.add_argument("--json", action="store_true", help="输出完整state为JSON")
     p.add_argument("--no-trace", action="store_true", help="禁用逐步执行输出")
+    p.add_argument(
+        "--compare",
+        metavar="TICKERS",
+        help="逗号分隔的股票代码，做并排对比，例如：NVDA,AMD",
+    )
     return p
 
 
@@ -77,6 +82,26 @@ def main(argv: list[str] | None = None) -> int:
         console.print(Panel("\n".join(lines), title=node, border_style="cyan"))
 
     try:
+        if args.compare:
+            from rich.table import Table
+
+            from .compare import compare_stocks
+
+            tickers = [t.strip() for t in args.compare.split(",") if t.strip()]
+            result = compare_stocks(args.query, tickers, agent=agent)
+
+            table = Table(title=f"Stock Comparison: {args.query}")
+            for col in ("Rank", "Ticker", "Verdict", "Conviction", "Price", "Score"):
+                table.add_column(col)
+            for i, s in enumerate(result.stocks, 1):
+                table.add_row(
+                    str(i), s.ticker, s.verdict, s.conviction,
+                    str(s.price if s.price is not None else "—"), f"{s.score:.0f}",
+                )
+            console.print(table)
+            console.print(Panel(result.summary, title="Comparison Summary", border_style="green"))
+            return 0
+
         if args.json or args.no_trace:
             result = agent.run(args.query)
             if args.json:

@@ -19,6 +19,19 @@ class MarketSnapshot:
     beta: Optional[float]
     analyst_recommendation: Optional[str]
     revenue_growth: Optional[float]
+    # Enriched fundamentals — all parsed from the same yfinance `.info` call
+    # (no extra network latency). Optional/None when unavailable.
+    name: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    target_mean_price: Optional[float] = None
+    num_analyst_opinions: Optional[float] = None
+    profit_margins: Optional[float] = None
+    gross_margins: Optional[float] = None
+    return_on_equity: Optional[float] = None
+    total_revenue: Optional[float] = None
+    earnings_growth: Optional[float] = None
+    two_hundred_day_average: Optional[float] = None
     retrieved_at: str = field(default="")
     source: str = field(default="yfinance")
 
@@ -37,6 +50,22 @@ class AShareSnapshot:
     source: str = field(default="akshare")
 
 
+def _normalize_dividend_yield(raw: Optional[float]) -> Optional[float]:
+    """Normalize yfinance's inconsistent dividend yield to a percent.
+
+    Across yfinance versions the field is sometimes a fraction (0.025) and
+    sometimes already a percent (2.5). Values < 1 are treated as fractions and
+    scaled up; obviously double-scaled values (> 100) are scaled back. Result is
+    a percent rounded to 2 dp (e.g. 2.5 means 2.5%).
+    """
+    if raw is None:
+        return None
+    value = raw * 100 if raw <= 1 else raw
+    if value > 100:
+        value = value / 100
+    return round(value, 2)
+
+
 def _normalize_ticker_for_yfinance(ticker: str) -> str:
     """Append exchange suffix for A-share 6-digit codes so yfinance can resolve them."""
     import re
@@ -51,7 +80,7 @@ def _normalize_ticker_for_yfinance(ticker: str) -> str:
 def fetch_market_snapshot(ticker: str) -> MarketSnapshot:
     import yfinance as yf
 
-    retrieved_at = dt.datetime.utcnow().isoformat() + "Z"
+    retrieved_at = dt.datetime.now(dt.timezone.utc).isoformat()
     yf_ticker = _normalize_ticker_for_yfinance(ticker)
     t = yf.Ticker(yf_ticker)
     info: Dict[str, Any] = {}
@@ -74,12 +103,23 @@ def fetch_market_snapshot(ticker: str) -> MarketSnapshot:
         market_cap=f("marketCap"),
         trailing_pe=f("trailingPE"),
         forward_pe=f("forwardPE"),
-        dividend_yield=f("dividendYield"),
+        dividend_yield=_normalize_dividend_yield(f("dividendYield")),
         week_52_high=f("fiftyTwoWeekHigh"),
         week_52_low=f("fiftyTwoWeekLow"),
         beta=f("beta"),
         analyst_recommendation=(info.get("recommendationKey") or None),
         revenue_growth=f("revenueGrowth"),
+        name=(info.get("shortName") or info.get("longName") or None),
+        sector=(info.get("sector") or None),
+        industry=(info.get("industry") or None),
+        target_mean_price=f("targetMeanPrice"),
+        num_analyst_opinions=f("numberOfAnalystOpinions"),
+        profit_margins=f("profitMargins"),
+        gross_margins=f("grossMargins"),
+        return_on_equity=f("returnOnEquity"),
+        total_revenue=f("totalRevenue"),
+        earnings_growth=f("earningsGrowth"),
+        two_hundred_day_average=f("twoHundredDayAverage"),
         retrieved_at=retrieved_at,
         source="yfinance",
     )
@@ -88,7 +128,7 @@ def fetch_market_snapshot(ticker: str) -> MarketSnapshot:
 def fetch_a_share_snapshot(ticker: str) -> AShareSnapshot:
     import akshare as ak
 
-    retrieved_at = dt.datetime.utcnow().isoformat() + "Z"
+    retrieved_at = dt.datetime.now(dt.timezone.utc).isoformat()
     # Normalize: strip common suffixes (.SS .SZ .SH) so akshare gets a 6-digit code
     clean = ticker.upper().replace(".SS", "").replace(".SZ", "").replace(".SH", "")
 

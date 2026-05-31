@@ -35,6 +35,29 @@ def test_create_run_rejects_empty_queries(query: str) -> None:
     assert response.json() == {"detail": "Query must not be empty."}
 
 
+def test_create_run_accepts_mode_preset() -> None:
+    store = InMemoryRunStore()
+    client = TestClient(create_app(run_store=store))
+
+    response = client.post("/api/runs", json={"query": "Analyze NVDA", "mode": "fast"})
+
+    assert response.status_code == 201
+    run_id = response.json()["run_id"]
+    run = store.get_run(run_id)
+    assert run is not None and run.mode == "fast"
+
+
+def test_create_run_invalid_mode_falls_back_to_standard() -> None:
+    store = InMemoryRunStore()
+    client = TestClient(create_app(run_store=store))
+
+    response = client.post("/api/runs", json={"query": "Analyze NVDA", "mode": "bogus"})
+
+    assert response.status_code == 201
+    run = store.get_run(response.json()["run_id"])
+    assert run is not None and run.mode == "standard"
+
+
 def test_create_run_rejects_second_active_run() -> None:
     client = TestClient(create_app(run_store=InMemoryRunStore()))
 
@@ -179,6 +202,8 @@ def test_get_run_snapshot_returns_completed_state() -> None:
             "trailing_pe": None,
             "forward_pe": 31.4,
             "dividend_yield": None,
+            "week_52_high": None,
+            "week_52_low": None,
         }
     ]
     assert data["error"] is None
@@ -231,6 +256,34 @@ def test_get_run_snapshot_returns_failed_state_without_rendered_report_html() ->
     assert data["followup_history"] == ["AWS competitive pricing"]
     assert data["market_highlights"] == []
     assert data["error"] == "search provider failed"
+
+
+def test_snapshot_surfaces_thesis_and_verification_for_ui() -> None:
+    """The snapshot the UI renders (verdict card, self-check, evidence panel)
+    must carry thesis / verification / sources / notes."""
+    store = InMemoryRunStore()
+    client = TestClient(create_app(run_store=store))
+    run = store.create_run("Analyze NVDA")
+    store.complete_run(
+        run.run_id,
+        final_report="Memo body [S1]",
+        snapshot={
+            "query": "Analyze NVDA",
+            "thesis": {"verdict": "bullish", "conviction": "medium", "bull_points": ["AI demand [S1]"]},
+            "verification": {"citations": 1, "invalid_citations": 0, "passed": True},
+            "sources": [{"id": 1, "title": "Reuters", "url": "https://reuters.com/x", "fetched": True}],
+            "notes": [{"source_id": 1, "claim": "Revenue grew", "why_it_matters": "growth"}],
+            "final_report": "Memo body [S1]",
+        },
+    )
+
+    data = client.get(f"/api/runs/{run.run_id}").json()
+    snap = data["snapshot"]
+    assert snap["thesis"]["verdict"] == "bullish"
+    assert snap["verification"]["passed"] is True
+    assert snap["sources"][0]["url"] == "https://reuters.com/x"
+    assert snap["notes"][0]["claim"] == "Revenue grew"
+    assert data["duration_s"] is not None
 
 
 def test_get_run_snapshot_returns_404_for_unknown_run() -> None:

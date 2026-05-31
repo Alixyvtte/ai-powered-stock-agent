@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import os
+import re
 import time
 from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional, TypedDict
@@ -11,8 +11,10 @@ from typing import Any, Dict, List, Optional, TypedDict
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field, ValidationError
 
+from .. import cache
 from ..config import AgentConfig
 from ..llm import get_chat_model
+from ..tools.content_fetch import fetch_readable_text
 from ..tools.market_data import fetch_a_share_snapshot, fetch_market_snapshot
 from ..tools.web_search import WebDocument, pick_best_docs, web_search
 
@@ -61,6 +63,53 @@ class FollowupDecision(BaseModel):
     )
 
 
+class VerificationResult(BaseModel):
+    passed: bool = Field(default=True, description="Whether the memo is well-supported and complete.")
+    issues: List[str] = Field(
+        default_factory=list,
+        description="Concrete problems: unsupported claims, missing sections, contradictions.",
+    )
+
+
+_CITATION_RE = re.compile(r"\[S(\d+)\]")
+
+
+def _cited_ids(text: str) -> set[int]:
+    return {int(m) for m in _CITATION_RE.findall(text or "")}
+
+
+def _sanitize_citations(text: str, valid_ids: set[int]) -> tuple[str, int]:
+    """Drop [S#] markers that reference a non-existent source. Returns (clean, removed)."""
+    removed = 0
+
+    def _replace(match: "re.Match[str]") -> str:
+        nonlocal removed
+        if int(match.group(1)) in valid_ids:
+            return match.group(0)
+        removed += 1
+        return ""
+
+    cleaned = _CITATION_RE.sub(_replace, text or "")
+    # tidy doubled spaces left by removed markers
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned, removed
+
+
+class InvestmentThesis(BaseModel):
+    verdict: str = Field(
+        default="neutral",
+        description="Overall stance: 'bullish', 'bearish', or 'neutral'.",
+    )
+    conviction: str = Field(
+        default="low",
+        description="Strength of the view given the evidence: 'high', 'medium', or 'low'.",
+    )
+    bull_points: List[str] = Field(default_factory=list, description="Key supporting points (cite [S#]).")
+    bear_points: List[str] = Field(default_factory=list, description="Key opposing points / risks (cite [S#]).")
+    valuation_view: str = Field(default="", description="One-line valuation read vs. fundamentals/peers.")
+    price_view: str = Field(default="", description="Brief view on price vs. analyst target / 200-day average.")
+
+
 class DeepSearchState(TypedDict, total=False):
     query: str
     iteration: int
@@ -77,11 +126,15 @@ class DeepSearchState(TypedDict, total=False):
     all_missing_angles: List[str]
     evidence_confidence: str
     research_timestamp: str
+    language: str
+    thesis: Dict[str, Any]
     final_report: str
+    verification: Dict[str, Any]
+    verify_attempts: int
+    verify_feedback: str
 
 
 _logger = logging.getLogger("stock_agent.trace")
-_EXTRACT_BATCH_SIZE = 8
 _MAX_NOTES_PER_SOURCE = 2
 _HIGH_SIGNAL_HOST_HINTS = (
     "sec.gov",
@@ -215,6 +268,13 @@ def _normalize_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
 
 
+def _detect_language(text: str) -> str:
+    """Pick the report language from the query: Chinese if it contains CJK, else English."""
+    if text and any("一" <= ch <= "鿿" for ch in text):
+        return "Chinese"
+    return "English"
+
+
 def _source_host(url: str) -> str:
     if not url:
         return ""
@@ -294,7 +354,7 @@ def _extract_source_notes(
 def build_deep_search_graph(config: Optional[AgentConfig] = None):
     cfg = config or AgentConfig.from_env()
     llm = get_chat_model(cfg)
-    use_structured = not bool(os.getenv("DEEPSEEK_API_KEY"))
+    use_structured = cfg.use_structured_output
 
     def plan_node(state: DeepSearchState) -> DeepSearchState:
         t0 = time.time()
@@ -342,8 +402,10 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
                     "Cross-check key claims across multiple independent sources.",
                 ],
             )
-        subqueries = plan.subqueries[:4]
-        research_timestamp = dt.datetime.utcnow().isoformat() + "Z"
+        # Queries run concurrently, so a slightly wider set improves coverage at
+        # negligible latency cost (downstream doc selection is still capped).
+        subqueries = plan.subqueries[:6]
+        research_timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
         _logger.info("plan:done seconds=%.2f subqueries=%d market_type=%s", time.time() - t0, len(subqueries), plan.market_type)
         return {
             "plan": plan.model_dump(),
@@ -355,6 +417,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             "all_missing_angles": [],
             "evidence_confidence": "medium",
             "research_timestamp": research_timestamp,
+            "language": _detect_language(q),
             "sources": [],
             "notes": [],
             "processed_source_ids": [],
@@ -371,20 +434,47 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             return {"market": {}}
 
         def _fetch_yf(ticker: str):
+            hit = cache.get("market_yf", ticker, cache.TTL_MARKET)
+            if hit is not None:
+                return "yfinance", ticker, hit
             try:
-                return "yfinance", ticker, fetch_market_snapshot(ticker).__dict__
+                data = fetch_market_snapshot(ticker).__dict__
             except Exception as e:
-                return "yfinance", ticker, {"ticker": ticker, "error": str(e)}
+                data = {"ticker": ticker, "error": str(e)}
+            if not data.get("error"):
+                cache.set("market_yf", ticker, data)
+            return "yfinance", ticker, data
 
         def _fetch_ak(ticker: str):
+            hit = cache.get("market_ak", ticker, cache.TTL_MARKET)
+            if hit is not None:
+                return "akshare", ticker, hit
             try:
-                return "akshare", ticker, fetch_a_share_snapshot(ticker).__dict__
+                data = fetch_a_share_snapshot(ticker).__dict__
             except Exception as e:
-                return "akshare", ticker, {"ticker": ticker, "error": str(e)}
+                data = {"ticker": ticker, "error": str(e)}
+            if not data.get("error"):
+                cache.set("market_ak", ticker, data)
+            return "akshare", ticker, data
+
+        market_type = (plan.market_type or "unknown").strip().lower()
+
+        def _fetchers_for(ticker: str):
+            # P2 routing: skip the slow akshare scrape for US names.
+            #   us_equity -> yfinance only
+            #   a_share   -> akshare primary + yfinance fallback
+            #   else      -> route by ticker shape (6-digit code = A-share)
+            if market_type == "us_equity":
+                return (_fetch_yf,)
+            if market_type == "a_share":
+                return (_fetch_ak, _fetch_yf)
+            if re.fullmatch(r"\d{6}", ticker):
+                return (_fetch_ak, _fetch_yf)
+            return (_fetch_yf,)
 
         results: Dict[str, Dict[str, Any]] = {t: {} for t in tickers}
-        tasks = [(fn, t) for t in tickers for fn in (_fetch_yf, _fetch_ak)]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        tasks = [(fn, t) for t in tickers for fn in _fetchers_for(t)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as executor:
             future_map = {executor.submit(fn, t): (fn.__name__, t) for fn, t in tasks}
             done, not_done = concurrent.futures.wait(future_map.keys(), timeout=15)
             for future in done:
@@ -410,41 +500,35 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         _logger.info("search_web:start iteration=%d queries=%d", iteration, len(active_queries))
         max_results = cfg.max_results_per_query
         all_docs: List[WebDocument] = []
-        
-        # 并发执行所有查询，极大地加快 search 阶段的速度
+
+        # Run all queries concurrently and hard-cap the wait so one slow provider
+        # never stalls the node; whatever returned in time is ranked downstream.
+        # The timeout follows the active preset (fast/standard/deep).
         import concurrent.futures
-        
-        # 极速模式：一次性并发所有查询，大幅降低超时时间，拿到什么算什么
-        # 不再使用休眠和批处理，以最快速度完成该节点
-        fast_timeout = min(cfg.timeout_s, 25) # 搜索最多给 25 秒
-        
-        # 即使是被超时截断的数据，我们也会尝试从中挑出最好的一批
-        # 所以不需要等待全部完成
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(active_queries))) as executor:
+
+        fast_timeout = cfg.timeout_s
+        workers = min(16, max(1, len(active_queries)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_query = {
                 executor.submit(web_search, sq, max_results=max_results, timeout_s=fast_timeout): sq
                 for sq in active_queries
             }
-            
-            # 使用带超时的 wait，强制截断
+            # Hard cap the wait so the node finishes within ~the preset timeout,
+            # using whatever results returned in time.
             done, not_done = concurrent.futures.wait(
-                future_to_query.keys(),
-                timeout=fast_timeout + 2  # 27 秒内必须结束整个 search_node 的并发
+                future_to_query.keys(), timeout=fast_timeout + 2
             )
-            
             for future in done:
                 try:
-                    docs = future.result()
-                    all_docs.extend(docs)
+                    all_docs.extend(future.result())
                 except Exception as e:
                     _logger.warning(f"search_web: query failed: {e}")
-                    
             for future in not_done:
                 _logger.warning(f"search_web: query timed out: {future_to_query[future]}")
                 future.cancel()
-                
-        picked = pick_best_docs(all_docs, limit=6)
+
+        # Keep enough new sources to feed the extract batch (scales with preset).
+        picked = pick_best_docs(all_docs, limit=max(6, cfg.extract_batch_size))
         existing = state.get("sources") or []
         existing_urls = {s.get("url") for s in existing if s.get("url")}
         new_sources: List[Dict[str, Any]] = []
@@ -468,6 +552,61 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             len(existing) + len(new_sources),
         )
         return {"sources": existing + new_sources}
+
+    def fetch_content_node(state: DeepSearchState) -> DeepSearchState:
+        """Enrich the top sources with full readable page text (snippets -> body).
+
+        Bounded to cfg.fetch_top_n (preset-driven: fast=0/off, standard=3, deep=6),
+        fetched concurrently, cached, and gated so a fetch failure never blocks
+        extraction. Already-fetched sources are skipped across loop iterations.
+        """
+        t0 = time.time()
+        top_n = int(cfg.fetch_top_n or 0)
+        sources = state.get("sources") or []
+        if top_n <= 0 or not sources:
+            _logger.info("fetch_content:skip top_n=%d", top_n)
+            return {}
+
+        candidates = [s for s in sources if s.get("url") and not s.get("fetched")]
+        candidates = sorted(candidates, key=_source_priority)[:top_n]
+        if not candidates:
+            _logger.info("fetch_content:done seconds=%.2f fetched=0", time.time() - t0)
+            return {}
+
+        import concurrent.futures
+        fetch_timeout = min(cfg.timeout_s, 12)
+
+        def _enrich(source: Dict[str, Any]):
+            return int(source["id"]), fetch_readable_text(
+                str(source.get("url") or ""), timeout_s=fetch_timeout, max_chars=5000
+            )
+
+        fetched: Dict[int, str] = {}
+        workers = max(1, min(8, len(candidates)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            for source_id, text in executor.map(_enrich, candidates):
+                fetched[source_id] = text
+
+        enriched = 0
+        new_sources: List[Dict[str, Any]] = []
+        for source in sources:
+            source_id = int(source.get("id") or 0)
+            if source_id not in fetched:
+                new_sources.append(source)
+                continue
+            updated = dict(source)
+            updated["fetched"] = True  # mark attempted to avoid refetching in loops
+            text = fetched[source_id]
+            if text and len(text) > len(str(source.get("content") or "")):
+                updated["content"] = text
+                enriched += 1
+            new_sources.append(updated)
+
+        _logger.info(
+            "fetch_content:done seconds=%.2f fetched=%d enriched=%d",
+            time.time() - t0, len(candidates), enriched,
+        )
+        return {"sources": new_sources}
 
     def extract_node(state: DeepSearchState) -> DeepSearchState:
         t0 = time.time()
@@ -497,26 +636,38 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             for s in sources
             if s.get("id") not in processed_source_id_set and (s.get("content") or "").strip()
         ]
-        batch = sorted(eligible, key=_source_priority)[:_EXTRACT_BATCH_SIZE]
+        batch = sorted(eligible, key=_source_priority)[: cfg.extract_batch_size]
         if not batch:
             _logger.info("extract:done seconds=%.2f batch=0", time.time() - t0)
             return {}
         accepted_notes: List[Dict[str, Any]] = []
+        topic = plan.topic or (state.get("query") or "Equity research")
 
-        for source in batch:
-            source_id = int(source["id"])
-            title = str(source.get("title") or "")
+        # P1: fetch evidence for all sources concurrently. The LLM call is the
+        # slow part, so running the batch in parallel turns "sum of N calls"
+        # into "slowest single call". Validation / dedup / merge below still run
+        # in deterministic batch order, so note ordering and processed-id
+        # tracking stay identical to the sequential version.
+        def _extract_one(source: Dict[str, Any]) -> EvidenceNotes:
             try:
-                out = _extract_source_notes(
-                    llm,
-                    use_structured=use_structured,
-                    topic=plan.topic or (state.get("query") or "Equity research"),
-                    source=source,
+                return _extract_source_notes(
+                    llm, use_structured=use_structured, topic=topic, source=source
                 )
             except Exception as exc:
-                _logger.warning("extract: source_id=%s failed: %s", source_id, exc)
-                out = EvidenceNotes(items=[])
+                _logger.warning("extract: source_id=%s failed: %s", source.get("id"), exc)
+                return EvidenceNotes(items=[])
 
+        workers = max(1, min(len(batch), cfg.extract_max_workers))
+        if workers > 1:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                outputs = list(executor.map(_extract_one, batch))
+        else:
+            outputs = [_extract_one(source) for source in batch]
+
+        for source, out in zip(batch, outputs):
+            source_id = int(source["id"])
+            title = str(source.get("title") or "")
             for note in out.items:
                 claim = (note.claim or "").strip()
                 why_it_matters = (note.why_it_matters or "").strip()
@@ -628,6 +779,46 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             "iteration": next_iteration,
         }
 
+    def synthesize_node(state: DeepSearchState) -> DeepSearchState:
+        """Form a structured investment thesis (verdict / conviction / bull / bear /
+        valuation) BEFORE writing, so the memo leads with a judgment, not prose."""
+        t0 = time.time()
+        _logger.info("synthesize:start")
+        plan = ResearchPlan.model_validate(state.get("plan") or {})
+        notes = state.get("notes") or []
+        market = state.get("market") or {}
+        language = state.get("language") or "English"
+        evidence_confidence = state.get("evidence_confidence") or "medium"
+        prompt = (
+            "You are the lead analyst forming an investment thesis from the gathered evidence.\n"
+            "Decide an overall verdict (bullish/bearish/neutral) and conviction (high/medium/low) "
+            "that is consistent with the strength of the evidence.\n"
+            "Provide 2-5 bull_points and 2-5 bear_points, each citing [S#] where possible.\n"
+            "Give a one-line valuation_view and a one-line price_view grounded in the market_snapshot.\n"
+            "Do NOT fabricate; base everything on the notes and market data.\n"
+            f"Write bull_points / bear_points / valuation_view / price_view in {language}; "
+            "keep verdict and conviction as the English enum values.\n"
+            f"topic: {plan.topic}\n"
+            f"evidence_confidence: {evidence_confidence}\n"
+            f"market_snapshot: {market}\n"
+            "notes (up to 30):\n"
+        )
+        for n in notes[:30]:
+            prompt += f"- (S{n.get('source_id')}) {n.get('claim')} | {n.get('why_it_matters')}\n"
+        try:
+            thesis = (
+                llm.with_structured_output(InvestmentThesis).invoke(prompt)
+                if use_structured
+                else _invoke_model_json(llm, InvestmentThesis, prompt)
+            )
+        except Exception:
+            thesis = InvestmentThesis(verdict="neutral", conviction="low")
+        _logger.info(
+            "synthesize:done seconds=%.2f verdict=%s conviction=%s",
+            time.time() - t0, thesis.verdict, thesis.conviction,
+        )
+        return {"thesis": thesis.model_dump()}
+
     def write_node(state: DeepSearchState) -> DeepSearchState:
         t0 = time.time()
         _logger.info("write_report:start")
@@ -637,19 +828,29 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         market = state.get("market") or {}
         research_timestamp = state.get("research_timestamp") or "unknown"
         evidence_confidence = state.get("evidence_confidence") or "medium"
+        language = state.get("language") or "English"
+        thesis = state.get("thesis") or {}
         prompt = (
-            "You are an equity research analyst. Write a structured research memo in English based on the evidence.\n"
+            f"You are an equity research analyst. Write a structured research memo in {language} based on the evidence.\n"
+            f"Write the ENTIRE memo in {language}, including section headings and the disclaimer.\n"
             "Rules:\n"
             "1) Use only the provided sources/notes. Do NOT fabricate.\n"
-            "2) Add citations like [S#] after key statements (e.g., [S3]).\n"
-            "3) Must include: Executive Summary, Bull Case, Bear Case, Key Catalysts, Key Risks, Open Questions, Sources.\n"
-            f"4) Begin the Executive Summary with: 'Research as of {research_timestamp}.'\n"
-            "5) If evidence_confidence is 'low' or 'insufficient', prominently warn: "
-            "'NOTE: Evidence coverage is limited. Key claims may be unverified. Use with caution.'\n"
-            "6) End with: For research purposes only. Not investment advice.\n"
+            "2) Add citations like [S#] after key statements (e.g., [S3]). Keep the [S#] markers verbatim.\n"
+            f"3) Must include these sections (translate the headings into {language}): "
+            "Executive Summary, Bull Case, Bear Case, Key Catalysts, Key Risks, Open Questions, Sources.\n"
+            f"4) Begin with a line stating the research timestamp: {research_timestamp}, then open the "
+            "Executive Summary by stating the investment_thesis verdict and conviction, and justify it.\n"
+            "5) If evidence_confidence is 'low' or 'insufficient', prominently warn (in the report's language) "
+            "that evidence coverage is limited and key claims may be unverified.\n"
+            "6) End with a research-only / not-investment-advice disclaimer (in the report's language).\n"
+            "7) Where relevant, ground valuation, profitability and momentum claims in the "
+            "market_snapshot figures (price, market cap, trailing/forward P/E, margins, ROE, "
+            "revenue/earnings growth, analyst target vs. price, 200-day average).\n"
+            "8) Build Bull Case / Bear Case around the investment_thesis bull_points / bear_points.\n"
             f"topic: {plan.topic}\n"
             f"assumptions: {plan.assumptions}\n"
             f"evidence_confidence: {evidence_confidence}\n"
+            f"investment_thesis: {thesis}\n"
             f"market_snapshot: {market}\n"
             "notes:\n"
         )
@@ -658,35 +859,125 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         prompt += "\nSources:\n"
         for s in sources[:25]:
             prompt += f"- [S{s.get('id')}] {s.get('title')} {s.get('url')}\n"
+
+        verify_feedback = (state.get("verify_feedback") or "").strip()
+        if verify_feedback:
+            prompt += (
+                "\nThis is a REVISION of a prior draft. Fix these issues and re-emit the full memo, "
+                "keeping only [S#] citations that map to the Sources list above:\n"
+                f"{verify_feedback}\n"
+            )
+
         report = llm.invoke(prompt).content
         _logger.info("write_report:done seconds=%.2f chars=%d", time.time() - t0, len(str(report)))
         return {"final_report": str(report)}
+
+    def verify_node(state: DeepSearchState) -> DeepSearchState:
+        """Adversarial self-check after writing: validate [S#] citations against real
+        sources (and strip hallucinated ones), then critique for unsupported claims /
+        missing sections. If issues remain and a revision budget is left, route back to
+        write_report once. fast mode does the deterministic citation check only."""
+        t0 = time.time()
+        report = str(state.get("final_report") or "")
+        sources = state.get("sources") or []
+        language = state.get("language") or "English"
+        attempts = int(state.get("verify_attempts") or 0)
+        valid_ids = {int(s.get("id")) for s in sources if s.get("id") is not None}
+
+        cited = _cited_ids(report)
+        invalid = sorted(cited - valid_ids)
+        clean_report, removed = _sanitize_citations(report, valid_ids)
+
+        issues: List[str] = []
+        if invalid:
+            issues.append(f"Citations referencing non-existent sources were removed: {invalid}.")
+
+        passed = True
+        if cfg.mode != "fast":
+            prompt = (
+                "You are a skeptical reviewer. Check the research memo for problems: claims not "
+                "supported by the notes, missing required sections (Executive Summary, Bull Case, "
+                "Bear Case, Key Catalysts, Key Risks, Open Questions, Sources), or internal "
+                "contradictions. List concrete issues; set passed=false only if there are real "
+                f"problems. Reason about content regardless of language ({language}).\n"
+                f"notes:\n"
+            )
+            for n in (state.get("notes") or [])[:30]:
+                prompt += f"- (S{n.get('source_id')}) {n.get('claim')}\n"
+            prompt += f"\nMEMO:\n{clean_report[:6000]}\n"
+            try:
+                result = (
+                    llm.with_structured_output(VerificationResult).invoke(prompt)
+                    if use_structured
+                    else _invoke_model_json(llm, VerificationResult, prompt)
+                )
+                passed = bool(result.passed)
+                issues.extend(result.issues or [])
+            except Exception:
+                passed = True  # never block the report on a critique failure
+
+        max_revisions = 0 if cfg.mode == "fast" else 1
+        need_revision = (bool(invalid) or not passed) and attempts < max_revisions
+        verification = {
+            "citations": len(cited),
+            "invalid_citations": len(invalid),
+            "removed_citations": removed,
+            "passed": bool(passed and not invalid),
+            "issues": issues[:10],
+        }
+        _logger.info(
+            "verify:done seconds=%.2f citations=%d invalid=%d passed=%s revision=%s",
+            time.time() - t0, len(cited), len(invalid), verification["passed"], need_revision,
+        )
+        return {
+            "final_report": clean_report,
+            "verification": verification,
+            "verify_attempts": attempts + (1 if need_revision else 0),
+            "verify_feedback": ("; ".join(issues)[:1000] if need_revision else ""),
+        }
+
+    def route_after_verify(state: DeepSearchState) -> str:
+        return "write_report" if (state.get("verify_feedback") or "").strip() else "end"
 
     def route_after_decide(state: DeepSearchState) -> str:
         need_more = bool(state.get("need_more"))
         iteration = int(state.get("iteration") or 0)
         evidence_confidence = state.get("evidence_confidence") or "medium"
-        # If evidence is fundamentally insufficient, skip further search and write a caveated report
+        # Insufficient evidence: skip further search and go straight to synthesis,
+        # which produces a low-conviction thesis the caveated memo is built on.
         if evidence_confidence == "insufficient":
-            return "write_report"
+            return "synthesize"
         if need_more and iteration < int(state.get("max_iterations") or cfg.max_iterations):
             return "search_web"
-        return "write_report"
+        return "synthesize"
 
     g = StateGraph(DeepSearchState)
     g.add_node("plan", plan_node)
     g.add_node("market", market_node)
     g.add_node("search_web", search_node)
+    g.add_node("fetch_content", fetch_content_node)
     g.add_node("extract", extract_node)
     g.add_node("decide", decide_node)
+    g.add_node("synthesize", synthesize_node)
     g.add_node("write_report", write_node)
+    g.add_node("verify", verify_node)
 
     g.set_entry_point("plan")
+    # Linear pipeline. (P5 parallel market||search was reverted: once fetch_content
+    # was inserted, market->extract became a shorter path than
+    # search->fetch_content->extract, and the unequal-length fan-in made extract
+    # fire twice and downstream nodes write concurrently. P2 already makes market
+    # fast (~3s, US skips akshare), so the lost overlap is negligible.)
     g.add_edge("plan", "market")
     g.add_edge("market", "search_web")
-    g.add_edge("search_web", "extract")
+    g.add_edge("search_web", "fetch_content")
+    g.add_edge("fetch_content", "extract")
     g.add_edge("extract", "decide")
-    g.add_conditional_edges("decide", route_after_decide, {"search_web": "search_web", "write_report": "write_report"})
-    g.add_edge("write_report", END)
+    # decide loops back to search_web, or proceeds to synthesize -> write_report.
+    g.add_conditional_edges("decide", route_after_decide, {"search_web": "search_web", "synthesize": "synthesize"})
+    g.add_edge("synthesize", "write_report")
+    # write_report -> verify (self-check) -> either revise once or finish.
+    g.add_edge("write_report", "verify")
+    g.add_conditional_edges("verify", route_after_verify, {"write_report": "write_report", "end": END})
 
     return g.compile()

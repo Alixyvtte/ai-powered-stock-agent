@@ -51,6 +51,8 @@ The web workbench adds a thin API layer on top of the agent:
 - `POST /api/runs`: create a run
 - `GET /api/runs/{run_id}`: fetch the latest run snapshot
 - `GET /api/runs/{run_id}/events`: stream SSE events
+- `GET /api/runs/{run_id}/report.md`: download the final memo as Markdown
+- `GET /api/runs/{run_id}/report.pdf`: download the final memo as PDF
 - `GET /api/health`: health check
 
 ## Project Layout
@@ -119,6 +121,23 @@ python -m pip install -e ".[dev]"
 
 Create a `.env` file in the project root or export these variables in your shell.
 
+The LLM provider is auto-detected with priority: **miromind > DeepSeek > OpenAI**.
+
+Competition (miromind) setup — recommended:
+
+```env
+MIROMIND_API_KEY=your_key_here
+MIROMIND_MODEL=mirothinker-1-7-deepresearch-mini
+MIROMIND_BASE_URL=https://api.miromind.ai/v1
+# miromind speaks the OpenAI-compatible API but does not (yet) advertise
+# structured output, so the agent uses a robust manual JSON parsing path.
+# Set to true only if probe_miromind.py confirms tools/response_format support.
+MIROMIND_STRUCTURED_OUTPUT=false
+```
+
+> Tip: run `python scripts/probe_miromind.py` on a network that can reach
+> `api.miromind.ai` to verify connectivity and capabilities.
+
 Minimal OpenAI setup:
 
 ```env
@@ -145,14 +164,34 @@ SERPAPI_KEY=your_key_here
 Optional agent tuning:
 
 ```env
+# Speed / quality preset: fast | standard | deep (also switchable per-run in the UI)
+STOCK_AGENT_MODE=standard
+# These default from the chosen MODE; set explicitly to override.
 STOCK_AGENT_MAX_ITERATIONS=2
 STOCK_AGENT_MAX_RESULTS=5
-STOCK_AGENT_TIMEOUT_S=25
+STOCK_AGENT_TIMEOUT_S=20
+STOCK_AGENT_EXTRACT_BATCH=8        # sources extracted per pass (run in parallel)
+
+# Stream the final report token-by-token to the UI (perceived speed).
+# Set false if the provider rejects stream=true (verify via probe_miromind.py).
+STOCK_AGENT_STREAM=true
+
+# Disk cache for search / page content / market data (repeat queries are instant).
+STOCK_AGENT_CACHE=true
+STOCK_AGENT_CACHE_DIR=.cache/stock_agent
 ```
+
+Performance notes:
+
+- `extract` runs its per-source LLM calls in parallel (largest latency win).
+- `market` skips the slower A-share provider for US equities (`market_type` routing).
+- Search, page content and market snapshots are cached on disk with a TTL.
+- The web UI shows the end-to-end run duration and streams the report as it is written.
 
 Notes:
 
-- If `DEEPSEEK_API_KEY` is set, the code prefers DeepSeek over OpenAI.
+- Provider priority is `MIROMIND_API_KEY` > `DEEPSEEK_API_KEY` > `OPENAI_API_KEY`.
+- All three use the same OpenAI-compatible client; they differ only by base URL / model.
 - `.env` is loaded automatically by the agent at runtime.
 
 ## Run The CLI
@@ -199,6 +238,8 @@ http://127.0.0.1:8000/
 5. Enter a research query and submit the form.
 6. Watch the step timeline update live as the run progresses.
 7. Read the rendered final memo once the run completes.
+8. Download the memo as Markdown or PDF using the buttons in the Final Report panel.
+   PDF export embeds a CJK font, so Chinese reports render correctly.
 
 Useful URLs:
 
