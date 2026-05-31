@@ -54,8 +54,9 @@ class _FakeLLM:
                 )
             if "Schema name: EvidenceNotes" in prompt:
                 return _Msg(
-                    '{"items":[{"source_id":1,"claim":"revenue grew 10%",'
-                    '"why_it_matters":"top-line growth signal"}]}'
+                    '{"items":[{"source_id":1,'
+                    '"claim":"Data center revenue grew 10 percent year over year in the latest quarter.",'
+                    '"why_it_matters":"Top-line growth signals resilient demand and supports the earnings trajectory."}]}'
                 )
             if "Schema name: FollowupDecision" in prompt:
                 need = str(self._need_more).lower()
@@ -80,8 +81,8 @@ class _FakeLLM:
         if name == "EvidenceNotes":
             return schema(items=[{
                 "source_id": 1,
-                "claim": "revenue grew 10%",
-                "why_it_matters": "top-line growth signal",
+                "claim": "Data center revenue grew 10 percent year over year in the latest quarter.",
+                "why_it_matters": "Top-line growth signals resilient demand and supports the earnings trajectory.",
             }])
         if name == "FollowupDecision":
             return schema(

@@ -32,6 +32,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const reportCaution = document.getElementById("report-caution");
   const reportError = document.getElementById("report-error");
   const reportBody = document.getElementById("report-body");
+  const reportActions = document.getElementById("report-actions");
+  const downloadMd = document.getElementById("download-md");
+  const downloadPdf = document.getElementById("download-pdf");
   const timelineSteps = Array.from(document.querySelectorAll("[data-step]"));
 
   const summaryCards = {
@@ -608,8 +611,29 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  function renderDownloads() {
+    if (!reportActions) {
+      return;
+    }
+    const ready =
+      state.status === "completed" &&
+      Boolean(state.runId) &&
+      Boolean(state.finalReport || state.finalReportHtml);
+
+    reportActions.hidden = !ready;
+    if (ready) {
+      const base = `/api/runs/${encodeURIComponent(state.runId)}`;
+      downloadMd.href = `${base}/report.md`;
+      downloadPdf.href = `${base}/report.pdf`;
+    } else {
+      downloadMd.removeAttribute("href");
+      downloadPdf.removeAttribute("href");
+    }
+  }
+
   function renderReport() {
     renderReportState();
+    renderDownloads();
 
     const reportHtml = state.status === "completed" ? state.finalReportHtml || "" : "";
 

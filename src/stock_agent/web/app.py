@@ -5,9 +5,10 @@ from datetime import datetime
 from pathlib import Path
 from threading import Thread
 from typing import Any, Callable
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 from stock_agent.agent import DeepSearchAgent
 from stock_agent.event_adapter import build_run_failed_event
 
+from .export import build_report_markdown, markdown_to_pdf_bytes, safe_filename
 from .presentation import build_run_presentation, render_final_report_html
 from .runs import InMemoryRunStore, RunStatus, ActiveRunConflictError
 
@@ -23,6 +25,35 @@ BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 TERMINAL_EVENT_TYPES = {"run_completed", "run_failed"}
+
+
+def _content_disposition(slug: str, ext: str) -> str:
+    """Build a Content-Disposition header that survives non-ASCII filenames.
+
+    Provides an ASCII ``filename=`` fallback plus an RFC 5987 ``filename*=``
+    UTF-8 variant so Chinese report names download cleanly across browsers.
+    """
+    ascii_slug = slug.encode("ascii", "ignore").decode("ascii").strip("-") or "stock-research"
+    utf8_name = quote(f"{slug}.{ext}")
+    return f'attachment; filename="{ascii_slug}.{ext}"; filename*=UTF-8\'\'{utf8_name}'
+
+
+def _report_slug(run: Any) -> str:
+    plan = run.snapshot.get("plan") if isinstance(run.snapshot, dict) else None
+    topic = plan.get("topic") if isinstance(plan, dict) else None
+    return safe_filename(run.query or topic or "")
+
+
+def _build_markdown_for_run(run: Any) -> str:
+    snapshot = run.snapshot if isinstance(run.snapshot, dict) else {}
+    plan = snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else {}
+    return build_report_markdown(
+        query=run.query,
+        topic=(plan or {}).get("topic"),
+        final_report=run.final_report or "",
+        evidence_confidence=snapshot.get("evidence_confidence"),
+        generated_at=run.finished_at.isoformat() if run.finished_at else None,
+    )
 
 
 class CreateRunRequest(BaseModel):
@@ -172,6 +203,44 @@ def create_app(
                 for highlight in presentation.market_highlights
             ],
             error=run.error,
+        )
+
+    def _require_downloadable_run(run_id: str):
+        run = store.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
+        if run.status is not RunStatus.COMPLETED or not (run.final_report or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The report is not ready for download yet.",
+            )
+        return run
+
+    @app.get("/api/runs/{run_id}/report.md")
+    def download_report_markdown(run_id: str) -> Response:
+        run = _require_downloadable_run(run_id)
+        markdown_doc = _build_markdown_for_run(run)
+        return Response(
+            content=markdown_doc,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": _content_disposition(_report_slug(run), "md")},
+        )
+
+    @app.get("/api/runs/{run_id}/report.pdf")
+    def download_report_pdf(run_id: str) -> Response:
+        run = _require_downloadable_run(run_id)
+        markdown_doc = _build_markdown_for_run(run)
+        try:
+            pdf_bytes = markdown_to_pdf_bytes(markdown_doc)
+        except Exception as exc:  # pragma: no cover - depends on fpdf2/runtime fonts
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"PDF generation failed: {exc}",
+            ) from exc
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": _content_disposition(_report_slug(run), "pdf")},
         )
 
     @app.get("/api/runs/{run_id}/events")

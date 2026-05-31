@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import os
 import time
 from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional, TypedDict
@@ -294,7 +293,7 @@ def _extract_source_notes(
 def build_deep_search_graph(config: Optional[AgentConfig] = None):
     cfg = config or AgentConfig.from_env()
     llm = get_chat_model(cfg)
-    use_structured = not bool(os.getenv("DEEPSEEK_API_KEY"))
+    use_structured = cfg.use_structured_output
 
     def plan_node(state: DeepSearchState) -> DeepSearchState:
         t0 = time.time()
