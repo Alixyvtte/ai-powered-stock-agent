@@ -202,6 +202,8 @@ def test_get_run_snapshot_returns_completed_state() -> None:
             "trailing_pe": None,
             "forward_pe": 31.4,
             "dividend_yield": None,
+            "week_52_high": None,
+            "week_52_low": None,
         }
     ]
     assert data["error"] is None

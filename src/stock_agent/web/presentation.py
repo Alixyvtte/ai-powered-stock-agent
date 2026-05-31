@@ -47,6 +47,8 @@ class MarketHighlight:
     trailing_pe: float | int | None
     forward_pe: float | int | None
     dividend_yield: float | int | None
+    week_52_high: float | int | None = None
+    week_52_low: float | int | None = None
 
 
 @dataclass(slots=True)
@@ -133,6 +135,8 @@ def build_market_highlights(snapshot: dict[str, Any]) -> list[MarketHighlight]:
                 trailing_pe=_number_or_none(payload.get("trailing_pe")),
                 forward_pe=_number_or_none(payload.get("forward_pe")),
                 dividend_yield=_number_or_none(payload.get("dividend_yield")),
+                week_52_high=_number_or_none(payload.get("week_52_high")),
+                week_52_low=_number_or_none(payload.get("week_52_low")),
             )
         )
     return highlights

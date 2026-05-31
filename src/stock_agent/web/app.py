@@ -77,6 +77,8 @@ class MarketHighlightResponse(BaseModel):
     trailing_pe: float | int | None = None
     forward_pe: float | int | None = None
     dividend_yield: float | int | None = None
+    week_52_high: float | int | None = None
+    week_52_low: float | int | None = None
 
 
 class RunListItemResponse(BaseModel):
@@ -265,6 +267,8 @@ def create_app(
                     trailing_pe=highlight.trailing_pe,
                     forward_pe=highlight.forward_pe,
                     dividend_yield=highlight.dividend_yield,
+                    week_52_high=highlight.week_52_high,
+                    week_52_low=highlight.week_52_low,
                 )
                 for highlight in presentation.market_highlights
             ],
