@@ -65,3 +65,9 @@ cover/
 
 # macOS
 .DS_Store
+
+# stock-agent disk cache
+.cache/
+
+# local change-transfer artifact (not source)
+stock-agent-changes.patch

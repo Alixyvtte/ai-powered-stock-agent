@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import time
 from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional, TypedDict
@@ -10,6 +11,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field, ValidationError
 
+from .. import cache
 from ..config import AgentConfig
 from ..llm import get_chat_model
 from ..tools.market_data import fetch_a_share_snapshot, fetch_market_snapshot
@@ -80,7 +82,6 @@ class DeepSearchState(TypedDict, total=False):
 
 
 _logger = logging.getLogger("stock_agent.trace")
-_EXTRACT_BATCH_SIZE = 8
 _MAX_NOTES_PER_SOURCE = 2
 _HIGH_SIGNAL_HOST_HINTS = (
     "sec.gov",
@@ -341,8 +342,10 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
                     "Cross-check key claims across multiple independent sources.",
                 ],
             )
-        subqueries = plan.subqueries[:4]
-        research_timestamp = dt.datetime.utcnow().isoformat() + "Z"
+        # Queries run concurrently, so a slightly wider set improves coverage at
+        # negligible latency cost (downstream doc selection is still capped).
+        subqueries = plan.subqueries[:6]
+        research_timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
         _logger.info("plan:done seconds=%.2f subqueries=%d market_type=%s", time.time() - t0, len(subqueries), plan.market_type)
         return {
             "plan": plan.model_dump(),
@@ -370,20 +373,47 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             return {"market": {}}
 
         def _fetch_yf(ticker: str):
+            hit = cache.get("market_yf", ticker, cache.TTL_MARKET)
+            if hit is not None:
+                return "yfinance", ticker, hit
             try:
-                return "yfinance", ticker, fetch_market_snapshot(ticker).__dict__
+                data = fetch_market_snapshot(ticker).__dict__
             except Exception as e:
-                return "yfinance", ticker, {"ticker": ticker, "error": str(e)}
+                data = {"ticker": ticker, "error": str(e)}
+            if not data.get("error"):
+                cache.set("market_yf", ticker, data)
+            return "yfinance", ticker, data
 
         def _fetch_ak(ticker: str):
+            hit = cache.get("market_ak", ticker, cache.TTL_MARKET)
+            if hit is not None:
+                return "akshare", ticker, hit
             try:
-                return "akshare", ticker, fetch_a_share_snapshot(ticker).__dict__
+                data = fetch_a_share_snapshot(ticker).__dict__
             except Exception as e:
-                return "akshare", ticker, {"ticker": ticker, "error": str(e)}
+                data = {"ticker": ticker, "error": str(e)}
+            if not data.get("error"):
+                cache.set("market_ak", ticker, data)
+            return "akshare", ticker, data
+
+        market_type = (plan.market_type or "unknown").strip().lower()
+
+        def _fetchers_for(ticker: str):
+            # P2 routing: skip the slow akshare scrape for US names.
+            #   us_equity -> yfinance only
+            #   a_share   -> akshare primary + yfinance fallback
+            #   else      -> route by ticker shape (6-digit code = A-share)
+            if market_type == "us_equity":
+                return (_fetch_yf,)
+            if market_type == "a_share":
+                return (_fetch_ak, _fetch_yf)
+            if re.fullmatch(r"\d{6}", ticker):
+                return (_fetch_ak, _fetch_yf)
+            return (_fetch_yf,)
 
         results: Dict[str, Dict[str, Any]] = {t: {} for t in tickers}
-        tasks = [(fn, t) for t in tickers for fn in (_fetch_yf, _fetch_ak)]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        tasks = [(fn, t) for t in tickers for fn in _fetchers_for(t)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as executor:
             future_map = {executor.submit(fn, t): (fn.__name__, t) for fn, t in tasks}
             done, not_done = concurrent.futures.wait(future_map.keys(), timeout=15)
             for future in done:
@@ -409,18 +439,15 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         _logger.info("search_web:start iteration=%d queries=%d", iteration, len(active_queries))
         max_results = cfg.max_results_per_query
         all_docs: List[WebDocument] = []
-        
-        # 并发执行所有查询，极大地加快 search 阶段的速度
+
+        # Run all queries concurrently and hard-cap the wait so one slow provider
+        # never stalls the node; whatever returned in time is ranked downstream.
+        # The timeout follows the active preset (fast/standard/deep).
         import concurrent.futures
-        
-        # 极速模式：一次性并发所有查询，大幅降低超时时间，拿到什么算什么
-        # 不再使用休眠和批处理，以最快速度完成该节点
-        fast_timeout = min(cfg.timeout_s, 25) # 搜索最多给 25 秒
-        
-        # 即使是被超时截断的数据，我们也会尝试从中挑出最好的一批
-        # 所以不需要等待全部完成
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(active_queries))) as executor:
+
+        fast_timeout = cfg.timeout_s
+        workers = min(16, max(1, len(active_queries)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_query = {
                 executor.submit(web_search, sq, max_results=max_results, timeout_s=fast_timeout): sq
                 for sq in active_queries
@@ -496,26 +523,38 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             for s in sources
             if s.get("id") not in processed_source_id_set and (s.get("content") or "").strip()
         ]
-        batch = sorted(eligible, key=_source_priority)[:_EXTRACT_BATCH_SIZE]
+        batch = sorted(eligible, key=_source_priority)[: cfg.extract_batch_size]
         if not batch:
             _logger.info("extract:done seconds=%.2f batch=0", time.time() - t0)
             return {}
         accepted_notes: List[Dict[str, Any]] = []
+        topic = plan.topic or (state.get("query") or "Equity research")
 
-        for source in batch:
-            source_id = int(source["id"])
-            title = str(source.get("title") or "")
+        # P1: fetch evidence for all sources concurrently. The LLM call is the
+        # slow part, so running the batch in parallel turns "sum of N calls"
+        # into "slowest single call". Validation / dedup / merge below still run
+        # in deterministic batch order, so note ordering and processed-id
+        # tracking stay identical to the sequential version.
+        def _extract_one(source: Dict[str, Any]) -> EvidenceNotes:
             try:
-                out = _extract_source_notes(
-                    llm,
-                    use_structured=use_structured,
-                    topic=plan.topic or (state.get("query") or "Equity research"),
-                    source=source,
+                return _extract_source_notes(
+                    llm, use_structured=use_structured, topic=topic, source=source
                 )
             except Exception as exc:
-                _logger.warning("extract: source_id=%s failed: %s", source_id, exc)
-                out = EvidenceNotes(items=[])
+                _logger.warning("extract: source_id=%s failed: %s", source.get("id"), exc)
+                return EvidenceNotes(items=[])
 
+        workers = max(1, min(len(batch), cfg.extract_max_workers))
+        if workers > 1:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                outputs = list(executor.map(_extract_one, batch))
+        else:
+            outputs = [_extract_one(source) for source in batch]
+
+        for source, out in zip(batch, outputs):
+            source_id = int(source["id"])
+            title = str(source.get("title") or "")
             for note in out.items:
                 claim = (note.claim or "").strip()
                 why_it_matters = (note.why_it_matters or "").strip()
@@ -681,8 +720,12 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
     g.add_node("write_report", write_node)
 
     g.set_entry_point("plan")
+    # P5: market and search_web both depend only on the plan, so fan them out in
+    # parallel and join at extract (saves the market latency, which overlaps the
+    # search). The decide loop re-runs only search_web; market runs once.
     g.add_edge("plan", "market")
-    g.add_edge("market", "search_web")
+    g.add_edge("plan", "search_web")
+    g.add_edge("market", "extract")
     g.add_edge("search_web", "extract")
     g.add_edge("extract", "decide")
     g.add_conditional_edges("decide", route_after_decide, {"search_web": "search_web", "write_report": "write_report"})

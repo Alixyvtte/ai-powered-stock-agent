@@ -164,10 +164,29 @@ SERPAPI_KEY=your_key_here
 Optional agent tuning:
 
 ```env
+# Speed / quality preset: fast | standard | deep (also switchable per-run in the UI)
+STOCK_AGENT_MODE=standard
+# These default from the chosen MODE; set explicitly to override.
 STOCK_AGENT_MAX_ITERATIONS=2
 STOCK_AGENT_MAX_RESULTS=5
-STOCK_AGENT_TIMEOUT_S=25
+STOCK_AGENT_TIMEOUT_S=20
+STOCK_AGENT_EXTRACT_BATCH=8        # sources extracted per pass (run in parallel)
+
+# Stream the final report token-by-token to the UI (perceived speed).
+# Set false if the provider rejects stream=true (verify via probe_miromind.py).
+STOCK_AGENT_STREAM=true
+
+# Disk cache for search / page content / market data (repeat queries are instant).
+STOCK_AGENT_CACHE=true
+STOCK_AGENT_CACHE_DIR=.cache/stock_agent
 ```
+
+Performance notes:
+
+- `extract` runs its per-source LLM calls in parallel (largest latency win).
+- `market` skips the slower A-share provider for US equities (`market_type` routing).
+- Search, page content and market snapshots are cached on disk with a TTL.
+- The web UI shows the end-to-end run duration and streams the report as it is written.
 
 Notes:
 

@@ -35,6 +35,29 @@ def test_create_run_rejects_empty_queries(query: str) -> None:
     assert response.json() == {"detail": "Query must not be empty."}
 
 
+def test_create_run_accepts_mode_preset() -> None:
+    store = InMemoryRunStore()
+    client = TestClient(create_app(run_store=store))
+
+    response = client.post("/api/runs", json={"query": "Analyze NVDA", "mode": "fast"})
+
+    assert response.status_code == 201
+    run_id = response.json()["run_id"]
+    run = store.get_run(run_id)
+    assert run is not None and run.mode == "fast"
+
+
+def test_create_run_invalid_mode_falls_back_to_standard() -> None:
+    store = InMemoryRunStore()
+    client = TestClient(create_app(run_store=store))
+
+    response = client.post("/api/runs", json={"query": "Analyze NVDA", "mode": "bogus"})
+
+    assert response.status_code == 201
+    run = store.get_run(response.json()["run_id"])
+    assert run is not None and run.mode == "standard"
+
+
 def test_create_run_rejects_second_active_run() -> None:
     client = TestClient(create_app(run_store=InMemoryRunStore()))
 

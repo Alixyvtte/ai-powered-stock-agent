@@ -284,6 +284,31 @@ input {
   color: var(--text-subtle);
 }
 
+.query-controls select {
+  padding: 15px 14px;
+  color: var(--text-strong);
+  background: rgba(255, 253, 249, 0.94);
+  border: 1px solid rgba(81, 97, 119, 0.22);
+  border-radius: var(--radius-control);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  transition:
+    border-color var(--transition-base),
+    box-shadow var(--transition-base);
+}
+
+.query-controls select:focus-visible {
+  outline: none;
+  border-color: rgba(29, 106, 103, 0.45);
+  box-shadow: var(--shadow-focus);
+}
+
+.query-controls select:disabled {
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
 .query-controls button {
   min-width: 132px;
   padding: 15px 18px;
@@ -653,6 +678,25 @@ input {
   font-size: 1rem;
   line-height: 1.75;
   color: var(--text-body);
+}
+
+/* Live-streaming report text (before the formatted HTML swaps in). */
+.report-body.report-streaming {
+  white-space: pre-wrap;
+  font-family: var(--font-serif);
+}
+
+.report-body.report-streaming::after {
+  content: "▋";
+  margin-left: 1px;
+  color: var(--accent);
+  animation: reportCaret 1s step-end infinite;
+}
+
+@keyframes reportCaret {
+  50% {
+    opacity: 0;
+  }
 }
 
 .report-body > :first-child {

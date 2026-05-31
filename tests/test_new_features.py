@@ -207,7 +207,8 @@ def test_plan_node_initializes_all_new_state_fields(monkeypatch):
 # Test 3: market_node calls both yfinance and akshare
 # ─────────────────────────────────────────────────────────────
 
-def test_market_node_calls_both_sources(monkeypatch):
+def test_market_node_us_equity_skips_akshare(monkeypatch):
+    """P2 routing: a US-equity plan hits yfinance only, skipping the slow akshare scrape."""
     from stock_agent.config import AgentConfig
     from stock_agent.graphs import deep_search_graph as gmod
 
@@ -223,24 +224,56 @@ def test_market_node_calls_both_sources(monkeypatch):
         return _fake_a_share_snapshot(ticker)
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.setattr(gmod, "get_chat_model", lambda cfg: _FakeLLM())
+    monkeypatch.setattr(gmod, "get_chat_model", lambda cfg: _FakeLLM(market_type="us_equity"))
     monkeypatch.setattr(gmod, "web_search", _fake_web_search)
     monkeypatch.setattr(gmod, "fetch_market_snapshot", tracked_yf)
     monkeypatch.setattr(gmod, "fetch_a_share_snapshot", tracked_ak)
 
     graph = gmod.build_deep_search_graph(AgentConfig(max_iterations=1, max_results_per_query=1))
-    out = graph.invoke({"query": "研究NVDA", "max_iterations": 1})
+    out = graph.invoke({"query": "Research NVDA", "max_iterations": 1})
 
-    # Both fetchers must have been called
-    assert len(yf_calls) >= 1, "fetch_market_snapshot (yfinance) was not called"
-    assert len(ak_calls) >= 1, "fetch_a_share_snapshot (akshare) was not called"
+    assert len(yf_calls) >= 1, "yfinance should be called for a US equity"
+    assert ak_calls == [], "akshare must be skipped for us_equity (P2 routing)"
 
-    # market dict should be nested {ticker: {yfinance: ..., akshare: ...}}
     market = out.get("market") or {}
     assert market, "market should not be empty"
     ticker_key = list(market.keys())[0]
-    assert "yfinance" in market[ticker_key] or "_fetch_yf" in str(market[ticker_key])
-    assert "akshare" in market[ticker_key] or "_fetch_ak" in str(market[ticker_key])
+    assert "yfinance" in market[ticker_key]
+    assert "akshare" not in market[ticker_key]
+
+
+def test_market_node_a_share_uses_both_sources(monkeypatch):
+    """P2 routing: an A-share plan uses akshare (primary) plus yfinance fallback."""
+    from stock_agent.config import AgentConfig
+    from stock_agent.graphs import deep_search_graph as gmod
+
+    yf_calls = []
+    ak_calls = []
+
+    def tracked_yf(ticker):
+        yf_calls.append(ticker)
+        return _fake_market_snapshot(ticker)
+
+    def tracked_ak(ticker):
+        ak_calls.append(ticker)
+        return _fake_a_share_snapshot(ticker)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.setattr(gmod, "get_chat_model", lambda cfg: _FakeLLM(market_type="a_share"))
+    monkeypatch.setattr(gmod, "web_search", _fake_web_search)
+    monkeypatch.setattr(gmod, "fetch_market_snapshot", tracked_yf)
+    monkeypatch.setattr(gmod, "fetch_a_share_snapshot", tracked_ak)
+
+    graph = gmod.build_deep_search_graph(AgentConfig(max_iterations=1, max_results_per_query=1))
+    out = graph.invoke({"query": "研究贵州茅台", "max_iterations": 1})
+
+    assert len(yf_calls) >= 1, "yfinance fallback should be called for a_share"
+    assert len(ak_calls) >= 1, "akshare should be called for a_share"
+
+    market = out.get("market") or {}
+    assert market, "market should not be empty"
+    ticker_key = list(market.keys())[0]
+    assert "akshare" in market[ticker_key]
 
 
 def test_market_node_no_tickers_returns_empty(monkeypatch):

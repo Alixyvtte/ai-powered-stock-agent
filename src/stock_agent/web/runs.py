@@ -23,6 +23,7 @@ class RunRecord:
     status: RunStatus
     created_at: datetime
     updated_at: datetime
+    mode: str = "standard"
     started_at: datetime | None = None
     finished_at: datetime | None = None
     latest_node: str | None = None
@@ -45,7 +46,7 @@ class InMemoryRunStore:
         self._active_run_id: str | None = None
         self._conditions: dict[str, Condition] = {}
 
-    def create_run(self, query: str) -> RunRecord:
+    def create_run(self, query: str, mode: str = "standard") -> RunRecord:
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("Query must not be empty.")
@@ -62,6 +63,7 @@ class InMemoryRunStore:
                 status=RunStatus.QUEUED,
                 created_at=now,
                 updated_at=now,
+                mode=mode,
             )
             self._runs[run.run_id] = run
             self._active_run_id = run.run_id

@@ -12,6 +12,36 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Speed/quality presets. Each bundles the knobs that trade coverage depth for
+# latency. Individual env vars still override the chosen preset.
+PRESETS: dict[str, dict[str, int]] = {
+    "fast": {
+        "max_iterations": 1,
+        "max_results_per_query": 5,
+        "timeout_s": 12,
+        "extract_batch_size": 5,
+    },
+    "standard": {
+        "max_iterations": 2,
+        "max_results_per_query": 5,
+        "timeout_s": 20,
+        "extract_batch_size": 8,
+    },
+    "deep": {
+        "max_iterations": 3,
+        "max_results_per_query": 8,
+        "timeout_s": 30,
+        "extract_batch_size": 12,
+    },
+}
+DEFAULT_MODE = "standard"
+
+
+def normalize_mode(mode: Optional[str]) -> str:
+    candidate = (mode or "").strip().lower()
+    return candidate if candidate in PRESETS else DEFAULT_MODE
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     """Runtime configuration for the agent.
@@ -33,12 +63,26 @@ class AgentConfig:
     temperature: float = 0.2
 
     # ── pipeline tuning ──
+    mode: str = DEFAULT_MODE
     max_iterations: int = 2
     max_results_per_query: int = 5
-    timeout_s: int = 25
+    timeout_s: int = 20
+    # Max sources extracted per pass + concurrency of their (parallel) LLM calls.
+    extract_batch_size: int = 8
+    extract_max_workers: int = 8
+
+    # ── caching (search / page content / market snapshots) ──
+    enable_cache: bool = True
+    cache_dir: Optional[str] = None
+
+    # ── streaming ──
+    # Stream the final report token-by-token to the web UI (perceived speed).
+    # Requires the provider to support server-side streaming; disable if a
+    # provider rejects `stream=true` (verify via scripts/probe_miromind.py).
+    stream_tokens: bool = True
 
     @staticmethod
-    def from_env() -> "AgentConfig":
+    def from_env(mode: Optional[str] = None) -> "AgentConfig":
         miromind_key = os.getenv("MIROMIND_API_KEY")
         deepseek_key = os.getenv("DEEPSEEK_API_KEY")
         openai_key = os.getenv("OPENAI_API_KEY")
@@ -62,6 +106,9 @@ class AgentConfig:
             api_key = openai_key
             use_structured = _env_bool("OPENAI_STRUCTURED_OUTPUT", True)
 
+        resolved_mode = normalize_mode(mode or os.getenv("STOCK_AGENT_MODE", DEFAULT_MODE))
+        preset = PRESETS[resolved_mode]
+
         return AgentConfig(
             provider=provider,
             model=model,
@@ -69,7 +116,13 @@ class AgentConfig:
             api_key=api_key,
             use_structured_output=use_structured,
             temperature=float(os.getenv("STOCK_AGENT_TEMPERATURE", "0.2")),
-            max_iterations=int(os.getenv("STOCK_AGENT_MAX_ITERATIONS", "2")),
-            max_results_per_query=int(os.getenv("STOCK_AGENT_MAX_RESULTS", "5")),
-            timeout_s=int(os.getenv("STOCK_AGENT_TIMEOUT_S", "25")),
+            mode=resolved_mode,
+            max_iterations=int(os.getenv("STOCK_AGENT_MAX_ITERATIONS", str(preset["max_iterations"]))),
+            max_results_per_query=int(os.getenv("STOCK_AGENT_MAX_RESULTS", str(preset["max_results_per_query"]))),
+            timeout_s=int(os.getenv("STOCK_AGENT_TIMEOUT_S", str(preset["timeout_s"]))),
+            extract_batch_size=int(os.getenv("STOCK_AGENT_EXTRACT_BATCH", str(preset["extract_batch_size"]))),
+            extract_max_workers=int(os.getenv("STOCK_AGENT_EXTRACT_WORKERS", "8")),
+            enable_cache=_env_bool("STOCK_AGENT_CACHE", True),
+            cache_dir=os.getenv("STOCK_AGENT_CACHE_DIR") or None,
+            stream_tokens=_env_bool("STOCK_AGENT_STREAM", True),
         )

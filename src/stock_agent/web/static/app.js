@@ -19,6 +19,7 @@ const STEP_LABELS = {
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.getElementById("query-form");
   const queryInput = document.getElementById("query-input");
+  const modeSelect = document.getElementById("mode-select");
   const submitButton = document.getElementById("query-submit");
   const statusPanel = document.getElementById("run-status");
   const statusText = document.getElementById("status-text");
@@ -75,17 +76,23 @@ document.addEventListener("DOMContentLoaded", () => {
     evidenceConfidence: null,
     followupHistory: [],
     marketHighlights: [],
+    durationS: null,
+    streamingReport: "",
   };
 
   let eventSource = null;
   let isSubmitting = false;
   let noticeMessage = "";
   let latestTimestamp = null;
+  let runStartedAt = null;
 
   function syncControls() {
     const isBusy = isSubmitting || state.status === "queued" || state.status === "running";
     queryInput.disabled = isBusy;
     submitButton.disabled = isBusy;
+    if (modeSelect) {
+      modeSelect.disabled = isBusy;
+    }
   }
 
   function setNotice(message) {
@@ -307,7 +314,10 @@ document.addEventListener("DOMContentLoaded", () => {
         : "Run started. Waiting for the first completed step.";
       note = noticeMessage || "Live updates are streaming into the timeline and summary cards.";
     } else if (state.status === "completed") {
-      title = "Run completed.";
+      title =
+        typeof state.durationS === "number"
+          ? `Run completed in ${state.durationS.toFixed(1)}s.`
+          : "Run completed.";
       note = noticeMessage || "The latest report and step summaries are available below.";
     } else if (state.status === "failed") {
       title = "Run failed.";
@@ -643,6 +653,16 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // While the run is active, render the live-streaming report text as it is
+    // generated; the completed event then swaps in the formatted HTML.
+    if (state.status === "running" && state.streamingReport) {
+      reportBody.textContent = state.streamingReport;
+      reportBody.classList.remove("empty-state");
+      reportBody.classList.add("report-streaming");
+      return;
+    }
+    reportBody.classList.remove("report-streaming");
+
     reportBody.textContent =
       state.status === "failed"
         ? "No final report is available because the run ended in failure."
@@ -673,7 +693,10 @@ document.addEventListener("DOMContentLoaded", () => {
     state.evidenceConfidence = null;
     state.followupHistory = [];
     state.marketHighlights = [];
+    state.durationS = null;
+    state.streamingReport = "";
     latestTimestamp = null;
+    runStartedAt = null;
     clearNotice();
     render();
   }
@@ -699,11 +722,24 @@ document.addEventListener("DOMContentLoaded", () => {
     state.marketHighlights = Array.isArray(snapshotPayload.market_highlights)
       ? [...snapshotPayload.market_highlights]
       : normalizeMarketHighlightsFromSnapshot(state.snapshot);
+    state.durationS =
+      typeof snapshotPayload.duration_s === "number" ? snapshotPayload.duration_s : null;
     latestTimestamp = snapshotPayload.updated_at || null;
+    runStartedAt = snapshotPayload.started_at || null;
     render();
   }
 
   function handleWorkbenchEvent(event) {
+    // Report token deltas stream rapidly with near-equal timestamps, so they
+    // are handled before the stale-event guard and never update latestTimestamp.
+    if (event.type === "report_delta") {
+      if (state.status === "running") {
+        state.streamingReport = (state.streamingReport || "") + (event.text || "");
+        renderReport();
+      }
+      return;
+    }
+
     if (isStaleEvent(event.timestamp)) {
       return;
     }
@@ -723,6 +759,9 @@ document.addEventListener("DOMContentLoaded", () => {
       state.evidenceConfidence = extractEvidenceConfidence(state.snapshot, state.summaries);
       state.followupHistory = [];
       state.marketHighlights = normalizeMarketHighlightsFromSnapshot(state.snapshot);
+      state.durationS = null;
+      state.streamingReport = "";
+      runStartedAt = event.timestamp || runStartedAt;
       latestTimestamp = event.timestamp || latestTimestamp;
       clearNotice();
       render();
@@ -769,6 +808,12 @@ document.addEventListener("DOMContentLoaded", () => {
       state.evidenceConfidence = extractEvidenceConfidence(state.snapshot, state.summaries);
       state.followupHistory = mergeFollowupHistory(state.followupHistory, state.snapshot.followup_queries);
       state.marketHighlights = normalizeMarketHighlightsFromSnapshot(state.snapshot);
+      if (runStartedAt && event.timestamp) {
+        const ms = new Date(event.timestamp).getTime() - new Date(runStartedAt).getTime();
+        if (Number.isFinite(ms) && ms >= 0) {
+          state.durationS = ms / 1000;
+        }
+      }
       latestTimestamp = event.timestamp || latestTimestamp;
       clearNotice();
       render();
@@ -798,7 +843,7 @@ document.addEventListener("DOMContentLoaded", () => {
   function openEventStream(runId) {
     closeEventStream();
     eventSource = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
-    ["run_started", "step_completed", "run_completed", "run_failed"].forEach((eventType) => {
+    ["run_started", "step_completed", "run_completed", "run_failed", "report_delta"].forEach((eventType) => {
       eventSource.addEventListener(eventType, (message) => {
         const payload = JSON.parse(message.data);
         handleWorkbenchEvent(payload);
@@ -849,10 +894,11 @@ document.addEventListener("DOMContentLoaded", () => {
     syncControls();
 
     try {
+      const mode = modeSelect ? modeSelect.value : undefined;
       const response = await fetch("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query, mode }),
       });
 
       if (!response.ok) {

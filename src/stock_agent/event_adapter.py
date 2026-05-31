@@ -52,7 +52,15 @@ class RunFailedEvent(TypedDict, total=False):
     timestamp: str
 
 
-WorkbenchEvent = RunStartedEvent | StepCompletedEvent | RunCompletedEvent | RunFailedEvent
+class ReportDeltaEvent(TypedDict):
+    type: Literal["report_delta"]
+    text: str
+    timestamp: str
+
+
+WorkbenchEvent = (
+    RunStartedEvent | StepCompletedEvent | RunCompletedEvent | RunFailedEvent | ReportDeltaEvent
+)
 
 
 def _utc_now_iso() -> str:
@@ -249,6 +257,14 @@ def build_run_completed_event(
     )
 
 
+def build_report_delta_event(text: str, *, timestamp: str | None = None) -> ReportDeltaEvent:
+    return ReportDeltaEvent(
+        type="report_delta",
+        text=text,
+        timestamp=timestamp or _utc_now_iso(),
+    )
+
+
 def build_run_failed_event(
     error: str,
     snapshot: dict[str, Any],
@@ -270,8 +286,10 @@ def build_run_failed_event(
 __all__ = [
     "SUPPORTED_NODES",
     "StepCompletedEvent",
+    "ReportDeltaEvent",
     "WarningPayload",
     "WorkbenchEvent",
+    "build_report_delta_event",
     "build_run_completed_event",
     "build_run_failed_event",
     "build_run_started_event",

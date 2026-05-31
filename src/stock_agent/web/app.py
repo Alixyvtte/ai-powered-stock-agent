@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from stock_agent.agent import DeepSearchAgent
+from stock_agent.config import AgentConfig, normalize_mode
 from stock_agent.event_adapter import build_run_failed_event
 
 from .export import build_report_markdown, markdown_to_pdf_bytes, safe_filename
@@ -58,6 +59,7 @@ def _build_markdown_for_run(run: Any) -> str:
 
 class CreateRunRequest(BaseModel):
     query: str
+    mode: str | None = None  # fast | standard | deep (speed/quality preset)
 
 
 class CreateRunResponse(BaseModel):
@@ -85,6 +87,7 @@ class RunSnapshotResponse(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     latest_node: str | None = None
+    duration_s: float | None = None
     snapshot: dict[str, Any]
     summaries: dict[str, dict[str, Any]]
     final_report: str | None = None
@@ -120,7 +123,12 @@ def create_app(
             return
 
         try:
-            agent = build_agent()
+            # The default factory honours the run's speed/quality preset; an
+            # injected factory (e.g. in tests) is used as-is.
+            if build_agent is DeepSearchAgent:
+                agent = DeepSearchAgent(AgentConfig.from_env(mode=run.mode))
+            else:
+                agent = build_agent()
             for event in agent.stream_events(run.query):
                 if str(event.get("type") or "") == "run_completed":
                     event = {
@@ -152,7 +160,7 @@ def create_app(
     )
     def create_run(payload: CreateRunRequest) -> CreateRunResponse:
         try:
-            run = store.create_run(payload.query)
+            run = store.create_run(payload.query, mode=normalize_mode(payload.mode))
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except ActiveRunConflictError as exc:
@@ -174,6 +182,12 @@ def create_app(
             events=run.events,
         )
 
+        duration_s: float | None = None
+        if run.started_at is not None:
+            end = run.finished_at or run.updated_at
+            if end is not None:
+                duration_s = round(max((end - run.started_at).total_seconds(), 0.0), 2)
+
         return RunSnapshotResponse(
             run_id=run.run_id,
             query=run.query,
@@ -183,6 +197,7 @@ def create_app(
             started_at=run.started_at,
             finished_at=run.finished_at,
             latest_node=run.latest_node,
+            duration_s=duration_s,
             snapshot=run.snapshot,
             summaries=run.summaries,
             final_report=run.final_report,

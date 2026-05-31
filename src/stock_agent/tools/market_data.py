@@ -37,6 +37,22 @@ class AShareSnapshot:
     source: str = field(default="akshare")
 
 
+def _normalize_dividend_yield(raw: Optional[float]) -> Optional[float]:
+    """Normalize yfinance's inconsistent dividend yield to a percent.
+
+    Across yfinance versions the field is sometimes a fraction (0.025) and
+    sometimes already a percent (2.5). Values < 1 are treated as fractions and
+    scaled up; obviously double-scaled values (> 100) are scaled back. Result is
+    a percent rounded to 2 dp (e.g. 2.5 means 2.5%).
+    """
+    if raw is None:
+        return None
+    value = raw * 100 if raw <= 1 else raw
+    if value > 100:
+        value = value / 100
+    return round(value, 2)
+
+
 def _normalize_ticker_for_yfinance(ticker: str) -> str:
     """Append exchange suffix for A-share 6-digit codes so yfinance can resolve them."""
     import re
@@ -51,7 +67,7 @@ def _normalize_ticker_for_yfinance(ticker: str) -> str:
 def fetch_market_snapshot(ticker: str) -> MarketSnapshot:
     import yfinance as yf
 
-    retrieved_at = dt.datetime.utcnow().isoformat() + "Z"
+    retrieved_at = dt.datetime.now(dt.timezone.utc).isoformat()
     yf_ticker = _normalize_ticker_for_yfinance(ticker)
     t = yf.Ticker(yf_ticker)
     info: Dict[str, Any] = {}
@@ -74,7 +90,7 @@ def fetch_market_snapshot(ticker: str) -> MarketSnapshot:
         market_cap=f("marketCap"),
         trailing_pe=f("trailingPE"),
         forward_pe=f("forwardPE"),
-        dividend_yield=f("dividendYield"),
+        dividend_yield=_normalize_dividend_yield(f("dividendYield")),
         week_52_high=f("fiftyTwoWeekHigh"),
         week_52_low=f("fiftyTwoWeekLow"),
         beta=f("beta"),
@@ -88,7 +104,7 @@ def fetch_market_snapshot(ticker: str) -> MarketSnapshot:
 def fetch_a_share_snapshot(ticker: str) -> AShareSnapshot:
     import akshare as ak
 
-    retrieved_at = dt.datetime.utcnow().isoformat() + "Z"
+    retrieved_at = dt.datetime.now(dt.timezone.utc).isoformat()
     # Normalize: strip common suffixes (.SS .SZ .SH) so akshare gets a 6-digit code
     clean = ticker.upper().replace(".SS", "").replace(".SZ", "").replace(".SH", "")
 
