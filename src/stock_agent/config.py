@@ -20,18 +20,21 @@ PRESETS: dict[str, dict[str, int]] = {
         "max_results_per_query": 5,
         "timeout_s": 12,
         "extract_batch_size": 5,
+        "fetch_top_n": 0,        # snippets only — fastest
     },
     "standard": {
         "max_iterations": 2,
         "max_results_per_query": 5,
         "timeout_s": 20,
         "extract_batch_size": 8,
+        "fetch_top_n": 3,        # fetch full text for the 3 best sources
     },
     "deep": {
         "max_iterations": 3,
         "max_results_per_query": 8,
         "timeout_s": 30,
         "extract_batch_size": 12,
+        "fetch_top_n": 6,
     },
 }
 DEFAULT_MODE = "standard"
@@ -70,6 +73,10 @@ class AgentConfig:
     # Max sources extracted per pass + concurrency of their (parallel) LLM calls.
     extract_batch_size: int = 8
     extract_max_workers: int = 8
+    # How many top sources to fetch full readable text for (0 = snippets only).
+    # Dataclass default is 0 so a bare AgentConfig() never makes network fetches
+    # (e.g. in tests); from_env applies the preset value (standard=3, deep=6).
+    fetch_top_n: int = 0
 
     # ── caching (search / page content / market snapshots) ──
     enable_cache: bool = True
@@ -122,6 +129,7 @@ class AgentConfig:
             timeout_s=int(os.getenv("STOCK_AGENT_TIMEOUT_S", str(preset["timeout_s"]))),
             extract_batch_size=int(os.getenv("STOCK_AGENT_EXTRACT_BATCH", str(preset["extract_batch_size"]))),
             extract_max_workers=int(os.getenv("STOCK_AGENT_EXTRACT_WORKERS", "8")),
+            fetch_top_n=int(os.getenv("STOCK_AGENT_FETCH_TOP_N", str(preset["fetch_top_n"]))),
             enable_cache=_env_bool("STOCK_AGENT_CACHE", True),
             cache_dir=os.getenv("STOCK_AGENT_CACHE_DIR") or None,
             stream_tokens=_env_bool("STOCK_AGENT_STREAM", True),

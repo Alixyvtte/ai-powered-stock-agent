@@ -19,6 +19,19 @@ class MarketSnapshot:
     beta: Optional[float]
     analyst_recommendation: Optional[str]
     revenue_growth: Optional[float]
+    # Enriched fundamentals — all parsed from the same yfinance `.info` call
+    # (no extra network latency). Optional/None when unavailable.
+    name: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    target_mean_price: Optional[float] = None
+    num_analyst_opinions: Optional[float] = None
+    profit_margins: Optional[float] = None
+    gross_margins: Optional[float] = None
+    return_on_equity: Optional[float] = None
+    total_revenue: Optional[float] = None
+    earnings_growth: Optional[float] = None
+    two_hundred_day_average: Optional[float] = None
     retrieved_at: str = field(default="")
     source: str = field(default="yfinance")
 
@@ -96,6 +109,17 @@ def fetch_market_snapshot(ticker: str) -> MarketSnapshot:
         beta=f("beta"),
         analyst_recommendation=(info.get("recommendationKey") or None),
         revenue_growth=f("revenueGrowth"),
+        name=(info.get("shortName") or info.get("longName") or None),
+        sector=(info.get("sector") or None),
+        industry=(info.get("industry") or None),
+        target_mean_price=f("targetMeanPrice"),
+        num_analyst_opinions=f("numberOfAnalystOpinions"),
+        profit_margins=f("profitMargins"),
+        gross_margins=f("grossMargins"),
+        return_on_equity=f("returnOnEquity"),
+        total_revenue=f("totalRevenue"),
+        earnings_growth=f("earningsGrowth"),
+        two_hundred_day_average=f("twoHundredDayAverage"),
         retrieved_at=retrieved_at,
         source="yfinance",
     )

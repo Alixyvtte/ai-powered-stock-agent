@@ -8,6 +8,7 @@ SUPPORTED_NODES = (
     "plan",
     "market",
     "search_web",
+    "fetch_content",
     "extract",
     "decide",
     "write_report",
@@ -149,6 +150,14 @@ def summarize_step(node: str, state_before: dict[str, Any], state_after: dict[st
         return {
             "total_sources": total_sources,
             "new_sources": max(total_sources - previous_sources, 0),
+        }
+
+    if node == "fetch_content":
+        sources = state_after.get("sources") or []
+        fetched = sum(1 for s in sources if isinstance(s, dict) and s.get("fetched"))
+        return {
+            "total_sources": len(sources),
+            "fetched_sources": fetched,
         }
 
     if node == "extract":

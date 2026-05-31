@@ -303,6 +303,7 @@ def create_app(
                     "plan",
                     "market",
                     "search_web",
+                    "fetch_content",
                     "extract",
                     "decide",
                     "write_report",

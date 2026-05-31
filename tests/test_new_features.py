@@ -466,3 +466,14 @@ def test_graph_smoke_updated(monkeypatch):
     assert out.get("research_timestamp"), "research_timestamp must be set"
     assert out.get("evidence_confidence") in {"high", "medium", "low", "insufficient"}
     assert isinstance(out.get("all_missing_angles"), list)
+    # Chinese query -> report language follows the query (#9)
+    assert out.get("language") == "Chinese"
+
+
+def test_detect_language_follows_query():
+    from stock_agent.graphs.deep_search_graph import _detect_language
+
+    assert _detect_language("研究英伟达未来催化剂") == "Chinese"
+    assert _detect_language("Analyze NVDA catalysts") == "English"
+    assert _detect_language("NVDA 英伟达") == "Chinese"  # mixed -> Chinese
+    assert _detect_language("") == "English"

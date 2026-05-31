@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .. import cache
 from ..config import AgentConfig
 from ..llm import get_chat_model
+from ..tools.content_fetch import fetch_readable_text
 from ..tools.market_data import fetch_a_share_snapshot, fetch_market_snapshot
 from ..tools.web_search import WebDocument, pick_best_docs, web_search
 
@@ -78,6 +79,7 @@ class DeepSearchState(TypedDict, total=False):
     all_missing_angles: List[str]
     evidence_confidence: str
     research_timestamp: str
+    language: str
     final_report: str
 
 
@@ -213,6 +215,13 @@ def _classify_source(url: str) -> str:
     return "aggregator"
 def _normalize_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
+
+
+def _detect_language(text: str) -> str:
+    """Pick the report language from the query: Chinese if it contains CJK, else English."""
+    if text and any("一" <= ch <= "鿿" for ch in text):
+        return "Chinese"
+    return "English"
 
 
 def _source_host(url: str) -> str:
@@ -357,6 +366,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             "all_missing_angles": [],
             "evidence_confidence": "medium",
             "research_timestamp": research_timestamp,
+            "language": _detect_language(q),
             "sources": [],
             "notes": [],
             "processed_source_ids": [],
@@ -494,6 +504,61 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             len(existing) + len(new_sources),
         )
         return {"sources": existing + new_sources}
+
+    def fetch_content_node(state: DeepSearchState) -> DeepSearchState:
+        """Enrich the top sources with full readable page text (snippets -> body).
+
+        Bounded to cfg.fetch_top_n (preset-driven: fast=0/off, standard=3, deep=6),
+        fetched concurrently, cached, and gated so a fetch failure never blocks
+        extraction. Already-fetched sources are skipped across loop iterations.
+        """
+        t0 = time.time()
+        top_n = int(cfg.fetch_top_n or 0)
+        sources = state.get("sources") or []
+        if top_n <= 0 or not sources:
+            _logger.info("fetch_content:skip top_n=%d", top_n)
+            return {}
+
+        candidates = [s for s in sources if s.get("url") and not s.get("fetched")]
+        candidates = sorted(candidates, key=_source_priority)[:top_n]
+        if not candidates:
+            _logger.info("fetch_content:done seconds=%.2f fetched=0", time.time() - t0)
+            return {}
+
+        import concurrent.futures
+        fetch_timeout = min(cfg.timeout_s, 12)
+
+        def _enrich(source: Dict[str, Any]):
+            return int(source["id"]), fetch_readable_text(
+                str(source.get("url") or ""), timeout_s=fetch_timeout, max_chars=5000
+            )
+
+        fetched: Dict[int, str] = {}
+        workers = max(1, min(8, len(candidates)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            for source_id, text in executor.map(_enrich, candidates):
+                fetched[source_id] = text
+
+        enriched = 0
+        new_sources: List[Dict[str, Any]] = []
+        for source in sources:
+            source_id = int(source.get("id") or 0)
+            if source_id not in fetched:
+                new_sources.append(source)
+                continue
+            updated = dict(source)
+            updated["fetched"] = True  # mark attempted to avoid refetching in loops
+            text = fetched[source_id]
+            if text and len(text) > len(str(source.get("content") or "")):
+                updated["content"] = text
+                enriched += 1
+            new_sources.append(updated)
+
+        _logger.info(
+            "fetch_content:done seconds=%.2f fetched=%d enriched=%d",
+            time.time() - t0, len(candidates), enriched,
+        )
+        return {"sources": new_sources}
 
     def extract_node(state: DeepSearchState) -> DeepSearchState:
         t0 = time.time()
@@ -675,16 +740,22 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         market = state.get("market") or {}
         research_timestamp = state.get("research_timestamp") or "unknown"
         evidence_confidence = state.get("evidence_confidence") or "medium"
+        language = state.get("language") or "English"
         prompt = (
-            "You are an equity research analyst. Write a structured research memo in English based on the evidence.\n"
+            f"You are an equity research analyst. Write a structured research memo in {language} based on the evidence.\n"
+            f"Write the ENTIRE memo in {language}, including section headings and the disclaimer.\n"
             "Rules:\n"
             "1) Use only the provided sources/notes. Do NOT fabricate.\n"
-            "2) Add citations like [S#] after key statements (e.g., [S3]).\n"
-            "3) Must include: Executive Summary, Bull Case, Bear Case, Key Catalysts, Key Risks, Open Questions, Sources.\n"
-            f"4) Begin the Executive Summary with: 'Research as of {research_timestamp}.'\n"
-            "5) If evidence_confidence is 'low' or 'insufficient', prominently warn: "
-            "'NOTE: Evidence coverage is limited. Key claims may be unverified. Use with caution.'\n"
-            "6) End with: For research purposes only. Not investment advice.\n"
+            "2) Add citations like [S#] after key statements (e.g., [S3]). Keep the [S#] markers verbatim.\n"
+            f"3) Must include these sections (translate the headings into {language}): "
+            "Executive Summary, Bull Case, Bear Case, Key Catalysts, Key Risks, Open Questions, Sources.\n"
+            f"4) Begin with a line stating the research timestamp: {research_timestamp}.\n"
+            "5) If evidence_confidence is 'low' or 'insufficient', prominently warn (in the report's language) "
+            "that evidence coverage is limited and key claims may be unverified.\n"
+            "6) End with a research-only / not-investment-advice disclaimer (in the report's language).\n"
+            "7) Where relevant, ground valuation, profitability and momentum claims in the "
+            "market_snapshot figures (price, market cap, trailing/forward P/E, margins, ROE, "
+            "revenue/earnings growth, analyst target vs. price, 200-day average).\n"
             f"topic: {plan.topic}\n"
             f"assumptions: {plan.assumptions}\n"
             f"evidence_confidence: {evidence_confidence}\n"
@@ -715,18 +786,21 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
     g.add_node("plan", plan_node)
     g.add_node("market", market_node)
     g.add_node("search_web", search_node)
+    g.add_node("fetch_content", fetch_content_node)
     g.add_node("extract", extract_node)
     g.add_node("decide", decide_node)
     g.add_node("write_report", write_node)
 
     g.set_entry_point("plan")
-    # P5: market and search_web both depend only on the plan, so fan them out in
-    # parallel and join at extract (saves the market latency, which overlaps the
-    # search). The decide loop re-runs only search_web; market runs once.
+    # P5: market and search both depend only on the plan, so fan them out in
+    # parallel and join at extract (market latency overlaps the search). The
+    # search side flows through fetch_content (snippets -> full text). The decide
+    # loop re-runs search_web -> fetch_content; market runs once.
     g.add_edge("plan", "market")
     g.add_edge("plan", "search_web")
+    g.add_edge("search_web", "fetch_content")
+    g.add_edge("fetch_content", "extract")
     g.add_edge("market", "extract")
-    g.add_edge("search_web", "extract")
     g.add_edge("extract", "decide")
     g.add_conditional_edges("decide", route_after_decide, {"search_web": "search_web", "write_report": "write_report"})
     g.add_edge("write_report", END)
