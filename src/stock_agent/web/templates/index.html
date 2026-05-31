@@ -95,6 +95,17 @@
                 The completed memo will render here automatically after the run finishes.
               </div>
             </section>
+
+            <section id="evidence-panel" class="panel" hidden>
+              <div class="panel-heading">
+                <h2>Sources &amp; Evidence</h2>
+                <p class="detail-meta">What the agent found and the evidence it extracted.</p>
+              </div>
+              <h3 class="evidence-subhead">Sources</h3>
+              <ol id="evidence-sources" class="evidence-sources"></ol>
+              <h3 class="evidence-subhead">Evidence Notes</h3>
+              <ul id="evidence-notes" class="evidence-notes"></ul>
+            </section>
           </section>
 
           <aside id="summary-panel" class="panel summary-panel">
@@ -102,10 +113,25 @@
               <h2>Run Summary</h2>
             </div>
             <div id="summary-cards" class="summary-cards">
+              <section id="summary-verdict" class="summary-card verdict-card" data-verdict="" hidden>
+                <h3>Investment View</h3>
+                <p id="verdict-value" class="verdict-value">—</p>
+                <p id="verdict-meta" class="summary-meta"></p>
+              </section>
               <section id="summary-market" class="summary-card">
                 <h3>Market Snapshot</h3>
                 <p id="summary-market-value" class="summary-value">Waiting for market data.</p>
                 <p id="summary-market-meta" class="summary-meta">Coverage and key metrics will appear here.</p>
+                <div id="summary-market-range" class="range-bar" hidden>
+                  <div class="range-bar-track">
+                    <span id="range-bar-marker" class="range-bar-marker"></span>
+                  </div>
+                  <div class="range-bar-labels">
+                    <span id="range-low"></span>
+                    <span class="range-bar-caption">52-week range</span>
+                    <span id="range-high"></span>
+                  </div>
+                </div>
                 <ul id="summary-market-list" class="compact-list"></ul>
               </section>
               <section id="summary-sources" class="summary-card">
@@ -128,6 +154,11 @@
                 <p id="summary-followups-value" class="summary-value">0 follow-up queries</p>
                 <p id="summary-followups-meta" class="summary-meta">Loop decisions will update this count.</p>
                 <ul id="summary-followups-list" class="compact-list"></ul>
+              </section>
+              <section id="summary-verification" class="summary-card" hidden>
+                <h3>Self-Check</h3>
+                <p id="verification-value" class="summary-value">—</p>
+                <p id="verification-meta" class="summary-meta"></p>
               </section>
             </div>
           </aside>

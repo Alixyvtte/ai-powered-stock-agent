@@ -42,6 +42,19 @@ document.addEventListener("DOMContentLoaded", () => {
   const reportActions = document.getElementById("report-actions");
   const downloadMd = document.getElementById("download-md");
   const downloadPdf = document.getElementById("download-pdf");
+  const verdictCard = document.getElementById("summary-verdict");
+  const verdictValue = document.getElementById("verdict-value");
+  const verdictMeta = document.getElementById("verdict-meta");
+  const verificationCard = document.getElementById("summary-verification");
+  const verificationValue = document.getElementById("verification-value");
+  const verificationMeta = document.getElementById("verification-meta");
+  const evidencePanel = document.getElementById("evidence-panel");
+  const evidenceSources = document.getElementById("evidence-sources");
+  const evidenceNotes = document.getElementById("evidence-notes");
+  const marketRange = document.getElementById("summary-market-range");
+  const rangeMarker = document.getElementById("range-bar-marker");
+  const rangeLow = document.getElementById("range-low");
+  const rangeHigh = document.getElementById("range-high");
   const timelineSteps = Array.from(document.querySelectorAll("[data-step]"));
 
   const summaryCards = {
@@ -280,6 +293,8 @@ document.addEventListener("DOMContentLoaded", () => {
             forward_pe: typeof payload.forward_pe === "number" ? payload.forward_pe : null,
             dividend_yield:
               typeof payload.dividend_yield === "number" ? payload.dividend_yield : null,
+            week_52_high: typeof payload.week_52_high === "number" ? payload.week_52_high : null,
+            week_52_low: typeof payload.week_52_low === "number" ? payload.week_52_low : null,
           },
         ];
       }
@@ -676,11 +691,145 @@ document.addEventListener("DOMContentLoaded", () => {
     reportBody.classList.add("empty-state");
   }
 
+  function renderVerdict() {
+    if (!verdictCard) {
+      return;
+    }
+    const thesis = (state.snapshot && state.snapshot.thesis) || null;
+    const verdict = thesis && thesis.verdict ? String(thesis.verdict).toLowerCase() : "";
+    if (!verdict) {
+      verdictCard.hidden = true;
+      verdictCard.dataset.verdict = "";
+      return;
+    }
+    verdictCard.hidden = false;
+    verdictCard.dataset.verdict = ["bullish", "bearish", "neutral"].includes(verdict)
+      ? verdict
+      : "neutral";
+    verdictValue.textContent = verdict.charAt(0).toUpperCase() + verdict.slice(1);
+    const parts = [];
+    if (thesis.conviction) {
+      parts.push(`${thesis.conviction} conviction`);
+    }
+    if (thesis.valuation_view) {
+      parts.push(thesis.valuation_view);
+    }
+    verdictMeta.textContent = parts.join(" · ");
+  }
+
+  function renderVerification() {
+    if (!verificationCard) {
+      return;
+    }
+    const v = (state.snapshot && state.snapshot.verification) || null;
+    if (!v || typeof v !== "object") {
+      verificationCard.hidden = true;
+      return;
+    }
+    verificationCard.hidden = false;
+    verificationValue.textContent = v.passed ? "Passed ✓" : "Issues found";
+    const parts = [`${v.citations || 0} citations checked`];
+    if (v.invalid_citations) {
+      parts.push(`${v.invalid_citations} invalid removed`);
+    }
+    verificationMeta.textContent = parts.join(", ");
+  }
+
+  function renderEvidence() {
+    if (!evidencePanel) {
+      return;
+    }
+    const snap = state.snapshot || {};
+    const sources = Array.isArray(snap.sources) ? snap.sources : [];
+    const notes = Array.isArray(snap.notes) ? snap.notes : [];
+    if (!sources.length && !notes.length) {
+      evidencePanel.hidden = true;
+      return;
+    }
+    evidencePanel.hidden = false;
+
+    evidenceSources.replaceChildren(
+      ...sources.slice(0, 30).map((s) => {
+        const li = document.createElement("li");
+        li.append(`[S${s.id}] `);
+        const label = s.title || s.url || `Source ${s.id}`;
+        if (s.url) {
+          const a = document.createElement("a");
+          a.textContent = label;
+          a.href = s.url;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          li.append(a);
+        } else {
+          li.append(label);
+        }
+        if (s.fetched) {
+          const badge = document.createElement("span");
+          badge.className = "evidence-badge";
+          badge.textContent = "full text";
+          li.append(" ", badge);
+        }
+        return li;
+      }),
+    );
+
+    evidenceNotes.replaceChildren(
+      ...notes.slice(0, 40).map((n) => {
+        const li = document.createElement("li");
+        const claim = document.createElement("span");
+        claim.className = "evidence-claim";
+        claim.textContent = n.claim || "";
+        const ref = document.createElement("span");
+        ref.className = "evidence-ref";
+        ref.textContent = ` [S${n.source_id}]`;
+        li.append(claim, ref);
+        if (n.why_it_matters) {
+          const why = document.createElement("p");
+          why.className = "evidence-why";
+          why.textContent = n.why_it_matters;
+          li.append(why);
+        }
+        return li;
+      }),
+    );
+  }
+
+  function renderMarketRange() {
+    if (!marketRange) {
+      return;
+    }
+    const h = state.marketHighlights.find(
+      (x) =>
+        typeof x.price === "number" &&
+        typeof x.week_52_high === "number" &&
+        typeof x.week_52_low === "number" &&
+        x.week_52_high > x.week_52_low,
+    );
+    if (!h) {
+      marketRange.hidden = true;
+      return;
+    }
+    const pct = Math.max(
+      0,
+      Math.min(100, ((h.price - h.week_52_low) / (h.week_52_high - h.week_52_low)) * 100),
+    );
+    marketRange.hidden = false;
+    rangeMarker.style.left = `${pct}%`;
+    const cur = h.currency ? `${h.currency} ` : "";
+    rangeLow.textContent = `${cur}${h.week_52_low}`;
+    rangeHigh.textContent = `${cur}${h.week_52_high}`;
+    rangeMarker.title = `${cur}${h.price} (${pct.toFixed(0)}% of 52w range)`;
+  }
+
   function render() {
     renderStatus();
     renderTimeline();
     renderDetail();
     renderSummaryCards();
+    renderMarketRange();
+    renderVerdict();
+    renderVerification();
+    renderEvidence();
     renderReport();
     syncControls();
   }

@@ -256,6 +256,34 @@ def test_get_run_snapshot_returns_failed_state_without_rendered_report_html() ->
     assert data["error"] == "search provider failed"
 
 
+def test_snapshot_surfaces_thesis_and_verification_for_ui() -> None:
+    """The snapshot the UI renders (verdict card, self-check, evidence panel)
+    must carry thesis / verification / sources / notes."""
+    store = InMemoryRunStore()
+    client = TestClient(create_app(run_store=store))
+    run = store.create_run("Analyze NVDA")
+    store.complete_run(
+        run.run_id,
+        final_report="Memo body [S1]",
+        snapshot={
+            "query": "Analyze NVDA",
+            "thesis": {"verdict": "bullish", "conviction": "medium", "bull_points": ["AI demand [S1]"]},
+            "verification": {"citations": 1, "invalid_citations": 0, "passed": True},
+            "sources": [{"id": 1, "title": "Reuters", "url": "https://reuters.com/x", "fetched": True}],
+            "notes": [{"source_id": 1, "claim": "Revenue grew", "why_it_matters": "growth"}],
+            "final_report": "Memo body [S1]",
+        },
+    )
+
+    data = client.get(f"/api/runs/{run.run_id}").json()
+    snap = data["snapshot"]
+    assert snap["thesis"]["verdict"] == "bullish"
+    assert snap["verification"]["passed"] is True
+    assert snap["sources"][0]["url"] == "https://reuters.com/x"
+    assert snap["notes"][0]["claim"] == "Revenue grew"
+    assert data["duration_s"] is not None
+
+
 def test_get_run_snapshot_returns_404_for_unknown_run() -> None:
     client = TestClient(create_app(run_store=InMemoryRunStore()))
 
