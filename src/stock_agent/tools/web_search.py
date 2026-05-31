@@ -5,7 +5,7 @@ import os
 import requests
 import concurrent.futures
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 
 from .. import cache
 

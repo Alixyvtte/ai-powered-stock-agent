@@ -31,7 +31,7 @@ def test_list_runs_newest_first():
     store = InMemoryRunStore()
     a = store.create_run("first")
     store.complete_run(a.run_id, final_report="r", snapshot={})
-    b = store.create_run("second")
+    store.create_run("second")
     listed = store.list_runs()
     assert [r.query for r in listed][:2] == ["second", "first"]
 

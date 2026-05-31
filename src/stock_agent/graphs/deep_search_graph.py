@@ -513,25 +513,22 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
                 executor.submit(web_search, sq, max_results=max_results, timeout_s=fast_timeout): sq
                 for sq in active_queries
             }
-            
-            # 使用带超时的 wait，强制截断
+            # Hard cap the wait so the node finishes within ~the preset timeout,
+            # using whatever results returned in time.
             done, not_done = concurrent.futures.wait(
-                future_to_query.keys(),
-                timeout=fast_timeout + 2  # 27 秒内必须结束整个 search_node 的并发
+                future_to_query.keys(), timeout=fast_timeout + 2
             )
-            
             for future in done:
                 try:
-                    docs = future.result()
-                    all_docs.extend(docs)
+                    all_docs.extend(future.result())
                 except Exception as e:
                     _logger.warning(f"search_web: query failed: {e}")
-                    
             for future in not_done:
                 _logger.warning(f"search_web: query timed out: {future_to_query[future]}")
                 future.cancel()
-                
-        picked = pick_best_docs(all_docs, limit=6)
+
+        # Keep enough new sources to feed the extract batch (scales with preset).
+        picked = pick_best_docs(all_docs, limit=max(6, cfg.extract_batch_size))
         existing = state.get("sources") or []
         existing_urls = {s.get("url") for s in existing if s.get("url")}
         new_sources: List[Dict[str, Any]] = []

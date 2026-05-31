@@ -371,6 +371,10 @@ document.addEventListener("DOMContentLoaded", () => {
       const step = stepElement.dataset.step;
       const stepIndex = STEP_ORDER.indexOf(step);
       const stateLabel = stepElement.querySelector(".step-state");
+      const nameLabel = stepElement.querySelector(".step-name");
+      if (nameLabel && STEP_LABELS[step]) {
+        nameLabel.textContent = STEP_LABELS[step];
+      }
       let nextState = "idle";
       let nextLabel = "Idle";
 

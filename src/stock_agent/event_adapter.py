@@ -66,8 +66,32 @@ WorkbenchEvent = (
 )
 
 
+_SOURCE_CONTENT_PREVIEW = 200
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _lighten_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Trim heavy source bodies from the workbench snapshot.
+
+    The agent's internal state keeps full article text for extraction, but the
+    surfaced snapshot (streamed in every SSE event and persisted) only needs each
+    source's title / url / fetched flag plus the distilled notes — not the full
+    body. Truncating here keeps event payloads and the run DB small.
+    """
+    sources = snapshot.get("sources")
+    if not isinstance(sources, list):
+        return snapshot
+    light = dict(snapshot)
+    light["sources"] = [
+        {**s, "content": str(s.get("content") or "")[:_SOURCE_CONTENT_PREVIEW]}
+        if isinstance(s, dict) and s.get("content")
+        else s
+        for s in sources
+    ]
+    return light
 
 
 def _is_supported_node(node: str) -> bool:
@@ -254,14 +278,14 @@ def build_step_event(
     if not _is_supported_node(node):
         return None
 
-    next_snapshot = _apply_state_patch(state_before, state_patch)
+    next_snapshot = _lighten_snapshot(_apply_state_patch(state_before, state_patch))
     summary = summarize_step(node, state_before, next_snapshot)
     return StepCompletedEvent(
         type="step_completed",
         node=node,
         summary=summary,
         warnings=collect_step_warnings(node, summary),
-        state_patch=dict(state_patch),
+        state_patch=_lighten_snapshot(dict(state_patch)),
         snapshot=next_snapshot,
         timestamp=timestamp or _utc_now_iso(),
     )
@@ -276,7 +300,7 @@ def build_run_started_event(
     return RunStartedEvent(
         type="run_started",
         query=query,
-        snapshot=dict(snapshot),
+        snapshot=_lighten_snapshot(dict(snapshot)),
         timestamp=timestamp or _utc_now_iso(),
     )
 
@@ -289,7 +313,7 @@ def build_run_completed_event(
     return RunCompletedEvent(
         type="run_completed",
         final_report=str(snapshot.get("final_report") or ""),
-        snapshot=dict(snapshot),
+        snapshot=_lighten_snapshot(dict(snapshot)),
         timestamp=timestamp or _utc_now_iso(),
     )
 
@@ -312,7 +336,7 @@ def build_run_failed_event(
     event: RunFailedEvent = {
         "type": "run_failed",
         "error": error,
-        "snapshot": dict(snapshot),
+        "snapshot": _lighten_snapshot(dict(snapshot)),
         "timestamp": timestamp or _utc_now_iso(),
     }
     if node is not None:

@@ -308,3 +308,21 @@ def test_stream_events_streams_report_tokens(monkeypatch) -> None:
     assert deltas == ["Memo ", "body."]
     assert "".join(deltas) == "Memo body."
     assert events[-1]["final_report"] == "Memo body."
+
+
+def test_step_event_lightens_source_content():
+    """The surfaced snapshot truncates heavy source bodies (kept full only in
+    the agent's internal state) to keep SSE payloads and the run DB small."""
+    from stock_agent.event_adapter import build_step_event
+
+    long_body = "x" * 5000
+    event = build_step_event(
+        "search_web",
+        {"query": "q"},
+        {"sources": [{"id": 1, "title": "T", "url": "https://e.com/1", "content": long_body}]},
+    )
+    assert event is not None
+    snap_sources = event["snapshot"]["sources"]
+    assert len(snap_sources[0]["content"]) <= 200          # trimmed
+    assert snap_sources[0]["url"] == "https://e.com/1"      # other fields intact
+    assert event["summary"]["total_sources"] == 1           # counts unaffected

@@ -9,9 +9,7 @@ Tests for the new features added to plan_node, market_node, and decide_node:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Any, Dict, List
-from unittest.mock import MagicMock
+from dataclasses import dataclass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -172,7 +170,6 @@ def test_classify_source_aggregator():
 def test_plan_node_sets_research_timestamp_and_market_type(monkeypatch):
     from stock_agent.config import AgentConfig
     from stock_agent.graphs import deep_search_graph as gmod
-    from stock_agent.tools.web_search import WebDocument
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     monkeypatch.setattr(gmod, "get_chat_model", lambda cfg: _FakeLLM(market_type="us_equity"))
