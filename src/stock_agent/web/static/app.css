@@ -422,6 +422,57 @@ input {
   box-shadow: 0 14px 28px rgba(29, 106, 103, 0.24);
 }
 
+.cancel-btn {
+  margin-top: var(--space-2);
+  justify-self: start;
+  padding: 8px 16px;
+  border-radius: var(--radius-control);
+  border: 1px solid rgba(156, 66, 56, 0.32);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform var(--transition-base), box-shadow var(--transition-base);
+}
+
+.cancel-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 22px rgba(156, 66, 56, 0.18);
+}
+
+.cancel-btn[hidden] {
+  display: none;
+}
+
+.recent-runs {
+  position: relative;
+  z-index: 1;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.recent-runs[hidden] {
+  display: none;
+}
+
+.recent-runs .compact-list li {
+  background: var(--panel-muted);
+  border: 1px solid rgba(81, 97, 119, 0.12);
+  font-size: 0.88rem;
+}
+
+.recent-runs a {
+  color: var(--accent-strong);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.recent-run-meta {
+  color: var(--text-subtle);
+  font-size: 0.8rem;
+}
+
 .timeline-panel,
 .summary-panel {
   position: sticky;

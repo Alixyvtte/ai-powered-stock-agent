@@ -31,6 +31,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const statusText = document.getElementById("status-text");
   const statusRunId = document.getElementById("status-run-id");
   const statusNote = document.getElementById("status-note");
+  const cancelButton = document.getElementById("cancel-run");
+  const recentRuns = document.getElementById("recent-runs");
+  const recentRunsList = document.getElementById("recent-runs-list");
   const detailTitle = document.getElementById("detail-title");
   const detailTimestamp = document.getElementById("detail-timestamp");
   const detailEmpty = document.getElementById("detail-empty");
@@ -111,6 +114,9 @@ document.addEventListener("DOMContentLoaded", () => {
     submitButton.disabled = isBusy;
     if (modeSelect) {
       modeSelect.disabled = isBusy;
+    }
+    if (cancelButton) {
+      cancelButton.hidden = !(state.status === "queued" || state.status === "running");
     }
   }
 
@@ -973,6 +979,7 @@ document.addEventListener("DOMContentLoaded", () => {
       clearNotice();
       render();
       closeEventStream();
+      loadRecentRuns();
       return;
     }
 
@@ -992,6 +999,7 @@ document.addEventListener("DOMContentLoaded", () => {
       clearNotice();
       render();
       closeEventStream();
+      loadRecentRuns();
     }
   }
 
@@ -1074,6 +1082,60 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  async function cancelCurrentRun() {
+    if (!state.runId) {
+      return;
+    }
+    try {
+      await fetch(`/api/runs/${encodeURIComponent(state.runId)}/cancel`, { method: "POST" });
+    } catch (error) {
+      /* best-effort; UI updates regardless */
+    }
+    closeEventStream();
+    state.status = "failed";
+    state.error = "Run cancelled.";
+    render();
+    loadRecentRuns();
+  }
+
+  async function loadRecentRuns() {
+    if (!recentRuns || !recentRunsList) {
+      return;
+    }
+    try {
+      const response = await fetch("/api/runs");
+      if (!response.ok) {
+        return;
+      }
+      const runs = await response.json();
+      if (!Array.isArray(runs) || !runs.length) {
+        recentRuns.hidden = true;
+        return;
+      }
+      recentRuns.hidden = false;
+      recentRunsList.replaceChildren(
+        ...runs.slice(0, 8).map((r) => {
+          const li = document.createElement("li");
+          const a = document.createElement("a");
+          a.href = `?run_id=${encodeURIComponent(r.run_id)}`;
+          a.textContent = r.query || r.run_id;
+          const meta = document.createElement("span");
+          meta.className = "recent-run-meta";
+          meta.textContent = ` · ${r.status}`;
+          li.append(a, meta);
+          return li;
+        }),
+      );
+    } catch (error) {
+      /* ignore */
+    }
+  }
+
+  if (cancelButton) {
+    cancelButton.addEventListener("click", cancelCurrentRun);
+  }
+
   render();
   hydrateFromLocation();
+  loadRecentRuns();
 });

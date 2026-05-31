@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
@@ -78,6 +79,17 @@ class MarketHighlightResponse(BaseModel):
     dividend_yield: float | int | None = None
 
 
+class RunListItemResponse(BaseModel):
+    run_id: str
+    query: str
+    status: RunStatus
+    mode: str = "standard"
+    created_at: datetime
+    updated_at: datetime
+    latest_node: str | None = None
+    duration_s: float | None = None
+
+
 class RunSnapshotResponse(BaseModel):
     run_id: str
     query: str
@@ -104,7 +116,17 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="Stock Agent Analyst Workbench")
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    store = run_store or InMemoryRunStore()
+    if run_store is not None:
+        store = run_store
+    else:
+        # Default store persists run history to SQLite so runs survive restarts.
+        try:
+            from .persistence import SqliteRunPersistence
+
+            db_path = os.getenv("STOCK_AGENT_DB", ".cache/stock_agent/runs.db")
+            store = InMemoryRunStore(persistence=SqliteRunPersistence(db_path))
+        except Exception:
+            store = InMemoryRunStore()
     build_agent = agent_factory or DeepSearchAgent
 
     app.state.run_store = store
@@ -167,6 +189,35 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
         return CreateRunResponse(run_id=run.run_id, status=run.status)
+
+    @app.get("/api/runs", response_model=list[RunListItemResponse])
+    def list_runs() -> list[RunListItemResponse]:
+        items: list[RunListItemResponse] = []
+        for run in store.list_runs():
+            duration = None
+            if run.started_at and run.finished_at:
+                duration = round(max((run.finished_at - run.started_at).total_seconds(), 0.0), 2)
+            items.append(
+                RunListItemResponse(
+                    run_id=run.run_id,
+                    query=run.query,
+                    status=run.status,
+                    mode=run.mode,
+                    created_at=run.created_at,
+                    updated_at=run.updated_at,
+                    latest_node=run.latest_node,
+                    duration_s=duration,
+                )
+            )
+        return items
+
+    @app.post("/api/runs/{run_id}/cancel")
+    def cancel_run(run_id: str) -> dict[str, Any]:
+        try:
+            run = store.cancel_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.") from exc
+        return {"run_id": run.run_id, "status": run.status.value}
 
     @app.get("/api/runs/{run_id}", response_model=RunSnapshotResponse)
     def get_run_snapshot(run_id: str) -> RunSnapshotResponse:
