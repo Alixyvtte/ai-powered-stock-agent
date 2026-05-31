@@ -63,6 +63,53 @@ class FollowupDecision(BaseModel):
     )
 
 
+class VerificationResult(BaseModel):
+    passed: bool = Field(default=True, description="Whether the memo is well-supported and complete.")
+    issues: List[str] = Field(
+        default_factory=list,
+        description="Concrete problems: unsupported claims, missing sections, contradictions.",
+    )
+
+
+_CITATION_RE = re.compile(r"\[S(\d+)\]")
+
+
+def _cited_ids(text: str) -> set[int]:
+    return {int(m) for m in _CITATION_RE.findall(text or "")}
+
+
+def _sanitize_citations(text: str, valid_ids: set[int]) -> tuple[str, int]:
+    """Drop [S#] markers that reference a non-existent source. Returns (clean, removed)."""
+    removed = 0
+
+    def _replace(match: "re.Match[str]") -> str:
+        nonlocal removed
+        if int(match.group(1)) in valid_ids:
+            return match.group(0)
+        removed += 1
+        return ""
+
+    cleaned = _CITATION_RE.sub(_replace, text or "")
+    # tidy doubled spaces left by removed markers
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned, removed
+
+
+class InvestmentThesis(BaseModel):
+    verdict: str = Field(
+        default="neutral",
+        description="Overall stance: 'bullish', 'bearish', or 'neutral'.",
+    )
+    conviction: str = Field(
+        default="low",
+        description="Strength of the view given the evidence: 'high', 'medium', or 'low'.",
+    )
+    bull_points: List[str] = Field(default_factory=list, description="Key supporting points (cite [S#]).")
+    bear_points: List[str] = Field(default_factory=list, description="Key opposing points / risks (cite [S#]).")
+    valuation_view: str = Field(default="", description="One-line valuation read vs. fundamentals/peers.")
+    price_view: str = Field(default="", description="Brief view on price vs. analyst target / 200-day average.")
+
+
 class DeepSearchState(TypedDict, total=False):
     query: str
     iteration: int
@@ -80,7 +127,11 @@ class DeepSearchState(TypedDict, total=False):
     evidence_confidence: str
     research_timestamp: str
     language: str
+    thesis: Dict[str, Any]
     final_report: str
+    verification: Dict[str, Any]
+    verify_attempts: int
+    verify_feedback: str
 
 
 _logger = logging.getLogger("stock_agent.trace")
@@ -731,6 +782,46 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             "iteration": next_iteration,
         }
 
+    def synthesize_node(state: DeepSearchState) -> DeepSearchState:
+        """Form a structured investment thesis (verdict / conviction / bull / bear /
+        valuation) BEFORE writing, so the memo leads with a judgment, not prose."""
+        t0 = time.time()
+        _logger.info("synthesize:start")
+        plan = ResearchPlan.model_validate(state.get("plan") or {})
+        notes = state.get("notes") or []
+        market = state.get("market") or {}
+        language = state.get("language") or "English"
+        evidence_confidence = state.get("evidence_confidence") or "medium"
+        prompt = (
+            "You are the lead analyst forming an investment thesis from the gathered evidence.\n"
+            "Decide an overall verdict (bullish/bearish/neutral) and conviction (high/medium/low) "
+            "that is consistent with the strength of the evidence.\n"
+            "Provide 2-5 bull_points and 2-5 bear_points, each citing [S#] where possible.\n"
+            "Give a one-line valuation_view and a one-line price_view grounded in the market_snapshot.\n"
+            "Do NOT fabricate; base everything on the notes and market data.\n"
+            f"Write bull_points / bear_points / valuation_view / price_view in {language}; "
+            "keep verdict and conviction as the English enum values.\n"
+            f"topic: {plan.topic}\n"
+            f"evidence_confidence: {evidence_confidence}\n"
+            f"market_snapshot: {market}\n"
+            "notes (up to 30):\n"
+        )
+        for n in notes[:30]:
+            prompt += f"- (S{n.get('source_id')}) {n.get('claim')} | {n.get('why_it_matters')}\n"
+        try:
+            thesis = (
+                llm.with_structured_output(InvestmentThesis).invoke(prompt)
+                if use_structured
+                else _invoke_model_json(llm, InvestmentThesis, prompt)
+            )
+        except Exception:
+            thesis = InvestmentThesis(verdict="neutral", conviction="low")
+        _logger.info(
+            "synthesize:done seconds=%.2f verdict=%s conviction=%s",
+            time.time() - t0, thesis.verdict, thesis.conviction,
+        )
+        return {"thesis": thesis.model_dump()}
+
     def write_node(state: DeepSearchState) -> DeepSearchState:
         t0 = time.time()
         _logger.info("write_report:start")
@@ -741,6 +832,7 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         research_timestamp = state.get("research_timestamp") or "unknown"
         evidence_confidence = state.get("evidence_confidence") or "medium"
         language = state.get("language") or "English"
+        thesis = state.get("thesis") or {}
         prompt = (
             f"You are an equity research analyst. Write a structured research memo in {language} based on the evidence.\n"
             f"Write the ENTIRE memo in {language}, including section headings and the disclaimer.\n"
@@ -749,16 +841,19 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
             "2) Add citations like [S#] after key statements (e.g., [S3]). Keep the [S#] markers verbatim.\n"
             f"3) Must include these sections (translate the headings into {language}): "
             "Executive Summary, Bull Case, Bear Case, Key Catalysts, Key Risks, Open Questions, Sources.\n"
-            f"4) Begin with a line stating the research timestamp: {research_timestamp}.\n"
+            f"4) Begin with a line stating the research timestamp: {research_timestamp}, then open the "
+            "Executive Summary by stating the investment_thesis verdict and conviction, and justify it.\n"
             "5) If evidence_confidence is 'low' or 'insufficient', prominently warn (in the report's language) "
             "that evidence coverage is limited and key claims may be unverified.\n"
             "6) End with a research-only / not-investment-advice disclaimer (in the report's language).\n"
             "7) Where relevant, ground valuation, profitability and momentum claims in the "
             "market_snapshot figures (price, market cap, trailing/forward P/E, margins, ROE, "
             "revenue/earnings growth, analyst target vs. price, 200-day average).\n"
+            "8) Build Bull Case / Bear Case around the investment_thesis bull_points / bear_points.\n"
             f"topic: {plan.topic}\n"
             f"assumptions: {plan.assumptions}\n"
             f"evidence_confidence: {evidence_confidence}\n"
+            f"investment_thesis: {thesis}\n"
             f"market_snapshot: {market}\n"
             "notes:\n"
         )
@@ -767,20 +862,97 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
         prompt += "\nSources:\n"
         for s in sources[:25]:
             prompt += f"- [S{s.get('id')}] {s.get('title')} {s.get('url')}\n"
+
+        verify_feedback = (state.get("verify_feedback") or "").strip()
+        if verify_feedback:
+            prompt += (
+                "\nThis is a REVISION of a prior draft. Fix these issues and re-emit the full memo, "
+                "keeping only [S#] citations that map to the Sources list above:\n"
+                f"{verify_feedback}\n"
+            )
+
         report = llm.invoke(prompt).content
         _logger.info("write_report:done seconds=%.2f chars=%d", time.time() - t0, len(str(report)))
         return {"final_report": str(report)}
+
+    def verify_node(state: DeepSearchState) -> DeepSearchState:
+        """Adversarial self-check after writing: validate [S#] citations against real
+        sources (and strip hallucinated ones), then critique for unsupported claims /
+        missing sections. If issues remain and a revision budget is left, route back to
+        write_report once. fast mode does the deterministic citation check only."""
+        t0 = time.time()
+        report = str(state.get("final_report") or "")
+        sources = state.get("sources") or []
+        language = state.get("language") or "English"
+        attempts = int(state.get("verify_attempts") or 0)
+        valid_ids = {int(s.get("id")) for s in sources if s.get("id") is not None}
+
+        cited = _cited_ids(report)
+        invalid = sorted(cited - valid_ids)
+        clean_report, removed = _sanitize_citations(report, valid_ids)
+
+        issues: List[str] = []
+        if invalid:
+            issues.append(f"Citations referencing non-existent sources were removed: {invalid}.")
+
+        passed = True
+        if cfg.mode != "fast":
+            prompt = (
+                "You are a skeptical reviewer. Check the research memo for problems: claims not "
+                "supported by the notes, missing required sections (Executive Summary, Bull Case, "
+                "Bear Case, Key Catalysts, Key Risks, Open Questions, Sources), or internal "
+                "contradictions. List concrete issues; set passed=false only if there are real "
+                f"problems. Reason about content regardless of language ({language}).\n"
+                f"notes:\n"
+            )
+            for n in (state.get("notes") or [])[:30]:
+                prompt += f"- (S{n.get('source_id')}) {n.get('claim')}\n"
+            prompt += f"\nMEMO:\n{clean_report[:6000]}\n"
+            try:
+                result = (
+                    llm.with_structured_output(VerificationResult).invoke(prompt)
+                    if use_structured
+                    else _invoke_model_json(llm, VerificationResult, prompt)
+                )
+                passed = bool(result.passed)
+                issues.extend(result.issues or [])
+            except Exception:
+                passed = True  # never block the report on a critique failure
+
+        max_revisions = 0 if cfg.mode == "fast" else 1
+        need_revision = (bool(invalid) or not passed) and attempts < max_revisions
+        verification = {
+            "citations": len(cited),
+            "invalid_citations": len(invalid),
+            "removed_citations": removed,
+            "passed": bool(passed and not invalid),
+            "issues": issues[:10],
+        }
+        _logger.info(
+            "verify:done seconds=%.2f citations=%d invalid=%d passed=%s revision=%s",
+            time.time() - t0, len(cited), len(invalid), verification["passed"], need_revision,
+        )
+        return {
+            "final_report": clean_report,
+            "verification": verification,
+            "verify_attempts": attempts + (1 if need_revision else 0),
+            "verify_feedback": ("; ".join(issues)[:1000] if need_revision else ""),
+        }
+
+    def route_after_verify(state: DeepSearchState) -> str:
+        return "write_report" if (state.get("verify_feedback") or "").strip() else "end"
 
     def route_after_decide(state: DeepSearchState) -> str:
         need_more = bool(state.get("need_more"))
         iteration = int(state.get("iteration") or 0)
         evidence_confidence = state.get("evidence_confidence") or "medium"
-        # If evidence is fundamentally insufficient, skip further search and write a caveated report
+        # Insufficient evidence: skip further search and go straight to synthesis,
+        # which produces a low-conviction thesis the caveated memo is built on.
         if evidence_confidence == "insufficient":
-            return "write_report"
+            return "synthesize"
         if need_more and iteration < int(state.get("max_iterations") or cfg.max_iterations):
             return "search_web"
-        return "write_report"
+        return "synthesize"
 
     g = StateGraph(DeepSearchState)
     g.add_node("plan", plan_node)
@@ -789,20 +961,26 @@ def build_deep_search_graph(config: Optional[AgentConfig] = None):
     g.add_node("fetch_content", fetch_content_node)
     g.add_node("extract", extract_node)
     g.add_node("decide", decide_node)
+    g.add_node("synthesize", synthesize_node)
     g.add_node("write_report", write_node)
+    g.add_node("verify", verify_node)
 
     g.set_entry_point("plan")
-    # P5: market and search both depend only on the plan, so fan them out in
-    # parallel and join at extract (market latency overlaps the search). The
-    # search side flows through fetch_content (snippets -> full text). The decide
-    # loop re-runs search_web -> fetch_content; market runs once.
+    # Linear pipeline. (P5 parallel market||search was reverted: once fetch_content
+    # was inserted, market->extract became a shorter path than
+    # search->fetch_content->extract, and the unequal-length fan-in made extract
+    # fire twice and downstream nodes write concurrently. P2 already makes market
+    # fast (~3s, US skips akshare), so the lost overlap is negligible.)
     g.add_edge("plan", "market")
-    g.add_edge("plan", "search_web")
+    g.add_edge("market", "search_web")
     g.add_edge("search_web", "fetch_content")
     g.add_edge("fetch_content", "extract")
-    g.add_edge("market", "extract")
     g.add_edge("extract", "decide")
-    g.add_conditional_edges("decide", route_after_decide, {"search_web": "search_web", "write_report": "write_report"})
-    g.add_edge("write_report", END)
+    # decide loops back to search_web, or proceeds to synthesize -> write_report.
+    g.add_conditional_edges("decide", route_after_decide, {"search_web": "search_web", "synthesize": "synthesize"})
+    g.add_edge("synthesize", "write_report")
+    # write_report -> verify (self-check) -> either revise once or finish.
+    g.add_edge("write_report", "verify")
+    g.add_conditional_edges("verify", route_after_verify, {"write_report": "write_report", "end": END})
 
     return g.compile()

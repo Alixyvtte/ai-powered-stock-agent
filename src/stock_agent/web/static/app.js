@@ -5,7 +5,9 @@ const STEP_ORDER = [
   "fetch_content",
   "extract",
   "decide",
+  "synthesize",
   "write_report",
+  "verify",
 ];
 
 const STEP_LABELS = {
@@ -15,7 +17,9 @@ const STEP_LABELS = {
   fetch_content: "Read Sources",
   extract: "Extract Evidence",
   decide: "Decide",
+  synthesize: "Synthesize Thesis",
   write_report: "Write Report",
+  verify: "Self-Check",
 };
 
 document.addEventListener("DOMContentLoaded", () => {

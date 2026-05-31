@@ -306,7 +306,9 @@ def create_app(
                     "fetch_content",
                     "extract",
                     "decide",
+                    "synthesize",
                     "write_report",
+                    "verify",
                 ],
             },
         )

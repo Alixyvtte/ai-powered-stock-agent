@@ -64,8 +64,17 @@ class _FakeLLM:
                     f'{{"need_more":{need},"followup_queries":[],"missing_angles":[],'
                     f'"evidence_confidence":"{self._evidence_confidence}","refusal_reason":""}}'
                 )
+            if "Schema name: InvestmentThesis" in prompt:
+                return _Msg(
+                    '{"verdict":"bullish","conviction":"medium",'
+                    '"bull_points":["AI demand is strong [S1]"],'
+                    '"bear_points":["Valuation is rich"],'
+                    '"valuation_view":"Premium multiple vs peers","price_view":"Below analyst target"}'
+                )
+            if "Schema name: VerificationResult" in prompt:
+                return _Msg('{"passed":true,"issues":[]}')
             # write_node (free-form)
-            return _Msg("## Final Report\nResearch as of 2026-03-21T00:00:00Z.")
+            return _Msg("## Final Report\nResearch as of 2026-03-21T00:00:00Z. [S1]")
 
         # ── Structured output path (OpenAI) ──
         name = getattr(schema, "__name__", str(schema))
@@ -468,6 +477,16 @@ def test_graph_smoke_updated(monkeypatch):
     assert isinstance(out.get("all_missing_angles"), list)
     # Chinese query -> report language follows the query (#9)
     assert out.get("language") == "Chinese"
+    # synthesize produced a structured thesis used as the memo backbone (#7)
+    thesis = out.get("thesis") or {}
+    assert thesis.get("verdict") == "bullish"
+    assert thesis.get("conviction") == "medium"
+    assert len(thesis.get("bull_points") or []) >= 1
+    # verify ran the citation self-check and kept the valid [S1] citation (#8)
+    verification = out.get("verification") or {}
+    assert verification.get("passed") is True
+    assert verification.get("invalid_citations") == 0
+    assert verification.get("citations", 0) >= 1
 
 
 def test_detect_language_follows_query():

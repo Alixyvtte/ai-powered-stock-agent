@@ -11,7 +11,9 @@ SUPPORTED_NODES = (
     "fetch_content",
     "extract",
     "decide",
+    "synthesize",
     "write_report",
+    "verify",
 )
 
 
@@ -176,9 +178,26 @@ def summarize_step(node: str, state_before: dict[str, Any], state_after: dict[st
             "evidence_confidence": str(state_after.get("evidence_confidence") or ""),
         }
 
+    if node == "synthesize":
+        thesis = cast(dict[str, Any], state_after.get("thesis") or {})
+        return {
+            "verdict": str(thesis.get("verdict") or ""),
+            "conviction": str(thesis.get("conviction") or ""),
+            "bull_count": len(thesis.get("bull_points") or []),
+            "bear_count": len(thesis.get("bear_points") or []),
+        }
+
     if node == "write_report":
         report = str(state_after.get("final_report") or "")
         return {"report_length": len(report)}
+
+    if node == "verify":
+        verification = cast(dict[str, Any], state_after.get("verification") or {})
+        return {
+            "citations": int(verification.get("citations") or 0),
+            "invalid_citations": int(verification.get("invalid_citations") or 0),
+            "passed": bool(verification.get("passed", True)),
+        }
 
     return {}
 
@@ -210,6 +229,15 @@ def collect_step_warnings(node: str, summary: dict[str, Any]) -> list[WarningPay
                 "code": "low_evidence_confidence",
                 "severity": "warning",
                 "message": "Evidence confidence is low, so the resulting memo should be treated cautiously.",
+            }
+        )
+
+    if node == "verify" and (summary.get("invalid_citations", 0) > 0 or not summary.get("passed", True)):
+        warnings.append(
+            {
+                "code": "verification_issue",
+                "severity": "warning",
+                "message": "The self-check flagged citation or completeness issues; read the memo cautiously.",
             }
         )
 
